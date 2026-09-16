@@ -40,8 +40,14 @@ void printLog();
 
 /**
  * Global variables */
+// 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
+#define USE_SPIKE_SEQUENCE 0
 // Sample time can not go lower than 300us
-const uint32_t sampleTimeUs = 500; // desired sample time in us
+#if USE_SPIKE_SEQUENCE
+const uint32_t sampleTimeUs = 500;   // 20 samples inside a 10ms spike
+#else
+const uint32_t sampleTimeUs = 1000;  // 1ms: the driven mechanical tau is ~11ms
+#endif
 // const float ts = sampleTimeUs * 1e-6; // sample time in seconds
 // Robot configuration
 const float gear = 9.6;
@@ -122,8 +128,8 @@ void printLog()
     Serial.print(" ");    Serial.print(d->gyro[0],2);      // 11 (rad/s)
     Serial.print(" ");    Serial.print(d->gyro[1],2);      // 12 (rad/s)
     Serial.print(" ");    Serial.print(d->gyro[2],2);      // 13 (rad/s)
-    Serial.print(" ");    Serial.print(d->motorCurrent[0],2);  // 14 (A)
-    Serial.print(" ");    Serial.print(d->motorCurrent[1],2);  // 15 (A)
+    Serial.print(" ");    Serial.print(d->motorCurrent[0],4);  // 14 (A)
+    Serial.print(" ");    Serial.print(d->motorCurrent[1],4);  // 15 (A)
     Serial.println("");
     d++;
   }
@@ -162,9 +168,9 @@ void start()
 { // Start timing
   // reset log and encoders
   logsCnt = 0;
-  // change motor PWM frequency for sampling time test
-  // should not be above 100000 (100kHz), default is 80kHz.
-  motor.setPWMfrq(80000);
+  // NB! must not be an integer multiple of the sample rate, or every
+  // analogRead() of the current lands on the same point of the PWM ripple.
+  motor.setPWMfrq(77824);
   time_sec = 0;
   encoder.encoder[0] = 0; // left motor encoder
   encoder.encoder[1] = 0; // right motor encoder
@@ -187,7 +193,7 @@ void finished()
   motor.motorVoltage[0] = 0; // left motor
   motor.motorVoltage[1] = 0;  // right motor
   // set default PWM frequency
-  motor.setPWMfrq(80000);
+  motor.setPWMfrq(77824);
   // start updating display
   display.useDisplay = true;
   // wait for next button press
@@ -196,7 +202,7 @@ void finished()
 }
 
 /**
- * Simple 2-step sequence */
+ * 3 x 6V spikes, 10ms each, 300ms apart. Wheels off the floor. */
 void spikeSequence()
 { // this function is called at every sample time
   // and should never wait in a loop.
@@ -305,7 +311,7 @@ void SequenceTwoSteps()
         // Prepare next state
         desiredValue = 0; // reference value to the controller
         // to get start the log with no velocity
-        endTime = time_sec + 0.020; // new state to end after 20ms
+        endTime = time_sec + 0.100; // 100ms of zero, as current-offset baseline
         state = 10;
       }
       break;
@@ -431,7 +437,11 @@ void loop ( void )
       imu2.tick();
       encoder.tick();
       // updatePose();
+#if USE_SPIKE_SEQUENCE
       spikeSequence();
+#else
+      SequenceTwoSteps();
+#endif
       //
       if (state > 0)
       { // Only if started
