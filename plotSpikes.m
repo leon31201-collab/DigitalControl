@@ -3,11 +3,12 @@
 % Log columns: 1 t, 2 state, 3 ref, 4-5 volt(L,R), 6-7 enc(L,R),
 %              8-9 vel(L,R), 10 batt, 11-13 gyro, 14-15 current(L,R)
 
-file = 'logs/device-monitor-260909-111426.log';   % <- your spike log
+file = 'logs/device-monitor-260917-120144.log';   % <- your spike log
 motor = 2;                                % 1 = left, 2 = right
 PPR = 48;                                 % encoder counts per motor rev
 
-dd = readmatrix(file);
+dd = readmatrix(file, 'FileType', 'text', 'CommentStyle', '%');
+dd = dd(all(isfinite(dd), 2), :);
 t    = dd(:,1);
 volt = dd(:,3+motor);
 enc  = dd(:,5+motor);

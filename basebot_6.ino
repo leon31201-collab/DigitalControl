@@ -42,12 +42,8 @@ void printLog();
  * Global variables */
 // 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
 #define USE_SPIKE_SEQUENCE 0
-// Sample time can not go lower than 300us
-#if USE_SPIKE_SEQUENCE
+// Sample time can not go lower than 300us (exercise: 300 or 500us)
 const uint32_t sampleTimeUs = 500;   // 20 samples inside a 10ms spike
-#else
-const uint32_t sampleTimeUs = 1000;  // 1ms: the driven mechanical tau is ~11ms
-#endif
 // const float ts = sampleTimeUs * 1e-6; // sample time in seconds
 // Robot configuration
 const float gear = 9.6;
