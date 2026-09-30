@@ -43,7 +43,7 @@ void printLog();
 // 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
 #define USE_SPIKE_SEQUENCE 0
 // Sample time can not go lower than 300us (exercise: 300 or 500us)
-const uint32_t sampleTimeUs = 500;   // 20 samples inside a 10ms spike
+const uint32_t sampleTimeUs = 1000;   // 20 samples inside a 10ms spike
 // const float ts = sampleTimeUs * 1e-6; // sample time in seconds
 // Robot configuration
 const float gear = 9.6;
@@ -166,7 +166,7 @@ void start()
   logsCnt = 0;
   // NB! must not be an integer multiple of the sample rate, or every
   // analogRead() of the current lands on the same point of the PWM ripple.
-  motor.setPWMfrq(77824);
+  motor.setPWMfrq(80000);
   time_sec = 0;
   encoder.encoder[0] = 0; // left motor encoder
   encoder.encoder[1] = 0; // right motor encoder
