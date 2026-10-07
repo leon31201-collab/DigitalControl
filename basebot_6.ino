@@ -42,9 +42,12 @@ void printLog();
  * Global variables */
 // 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
 #define USE_SPIKE_SEQUENCE 0
-// Sample time can not go lower than 300us (exercise: 300 or 500us)
-const uint32_t sampleTimeUs = 1000;   // 20 samples inside a 10ms spike
-// const float ts = sampleTimeUs * 1e-6; // sample time in seconds
+// Sample time can not go lower than 300us (exercise: 300 or 500us, Lecture 5: 1000us)
+const uint32_t sampleTimeUs = 1000;   // 1 ms for Lecture 5 exercise
+// Exercise: Basebot sampling effects (Lecture 5)
+// Run 1: 80000 Hz
+// Run 2:  1990 Hz
+const uint32_t experimentPWMfrq = 1990; // <-- Set 80000 for Run 1, 1990 for Run 2
 // Robot configuration
 const float gear = 9.6;
 const float wheelRadius = 0.0315; // (m)
@@ -92,7 +95,8 @@ void printLog()
   Serial.println(robot.getRobotName());
   // hard-coded settings
   Serial.print("% Sample time ");  Serial.print(sampleTimeUs);
-  Serial.print(" us, Gear ");  Serial.print(gear);
+  Serial.print(" us, PWM ");  Serial.print(experimentPWMfrq);
+  Serial.print(" Hz, Gear ");  Serial.print(gear);
   Serial.print(", Wheels ");  Serial.print(wheelRadius);
   Serial.print(" m, PPR ");  Serial.println(encoder.pulsPerRev);
   Serial.print("% maximum log samples ");  Serial.print(logsMax);
@@ -107,6 +111,11 @@ void printLog()
   Serial.println("% 10  Battery voltage (V)");
   Serial.println("% 11-13 gyro (x,y,z) (rad/s)");
   Serial.println("% 14-15 motor current  (A)");
+
+  if (logsCnt == 0)
+  {
+    Serial.println("% WARNING: Log is empty (0 samples). Type 'start' to run the sequence first!");
+  }
 
   for (int i = 0; i < logsCnt; i++)
   {
@@ -164,9 +173,8 @@ void start()
 { // Start timing
   // reset log and encoders
   logsCnt = 0;
-  // NB! must not be an integer multiple of the sample rate, or every
-  // analogRead() of the current lands on the same point of the PWM ripple.
-  motor.setPWMfrq(80000);
+  // Set experiment PWM frequency
+  motor.setPWMfrq(experimentPWMfrq);
   time_sec = 0;
   encoder.encoder[0] = 0; // left motor encoder
   encoder.encoder[1] = 0; // right motor encoder
