@@ -39,24 +39,49 @@ void printLog();
 #include "src/uencoder.h"
 
 /**
- * Global variables */
-// 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
+ * =========================================================================
+ * SCHRITT 1: Globale Einstellungen, Geometrie & Regler-Speicher (Tustin)
+ * ========================================================================= */
+// 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (Driving straight test)
 #define USE_SPIKE_SEQUENCE 0
-// Sample time can not go lower than 300us (exercise: 300 or 500us, Lecture 5: 1000us)
-const uint32_t sampleTimeUs = 1000;   // 1 ms for Lecture 5 exercise
-// Exercise: Basebot sampling effects (Lecture 5)
-// Run 1: 80000 Hz
-// Run 2:  1990 Hz
-const uint32_t experimentPWMfrq = 1990; // <-- Set 80000 for Run 1, 1990 for Run 2
-// Robot configuration
+// Sample time can not go lower than 300us (1000us = 1ms allows ~4.3s of logging)
+const uint32_t sampleTimeUs = 1000;   // Ts = 1 ms = 0.001 s
+// Default high PWM frequency (77824 Hz) for quiet, ripple-free operation
+const uint32_t experimentPWMfrq = 77824;
+
+// Robot geometry configuration
 const float gear = 9.6;
 const float wheelRadius = 0.0315; // (m)
-const float wheelBase = 0.14;
-// pose values
-float distA = 0; // trip distance
-float pose[4];
-float poseVel[2];
+const float wheelBase = 0.14;     // (m) distance B between left and right wheel
+
+// Pose and kinematic state values
+float distA = 0;     // trip distance (m)
+float pose[4];       // [0]: x (m), [1]: y (m), [2]: heading h (rad), [3]: tilt (rad)
+float poseVel[2];    // [0]: forward velocity v (m/s), [1]: turnrate h_dot (rad/s)
 bool velSaturated = false;
+
+// Memory variables (x1 = value from last sample k-1) for Tustin integrators in updatePose()
+float poseVel_prev[2] = {0.0f, 0.0f}; // [0]: v(k-1), [1]: turnrate(k-1)
+float vx_prev = 0.0f;                 // vx(k-1) = v(k-1)*cos(h(k-1))
+float vy_prev = 0.0f;                 // vy(k-1) = v(k-1)*sin(h(k-1))
+
+// Inner Loop: Motor Velocity PI Controller Parameters (from piDesign.mat)
+const float Kp_vel = 0.2f;            // Proportional gain (V / (rad/s))
+const float taui_vel = 1.0f;          // Integral time constant (s)
+const float maxMotorVolt = 9.0f;      // Saturation limit (V)
+float velErr_prev[2] = {0.0f, 0.0f};  // e_vel(k-1) for [0]=left, [1]=right
+float velInt[2] = {0.0f, 0.0f};       // u_I(k-1) for [0]=left, [1]=right
+float inVelLeft = 0.0f;               // Reference velocity left wheel (m/s)
+float inVelRight = 0.0f;              // Reference velocity right wheel (m/s)
+
+// Outer Loop: Turnrate PI Controller Parameters (Week 7, Slide 13 & 14)
+bool useTurnrateControl = true;       // true = closed-loop turnrate PI active
+bool useImuTurnrate = false;          // false = encoder turnrate poseVel[1], true = IMU gyro Z
+const float Kp_turn = 5.0f;           // Turnrate proportional gain Kpt
+const float taui_turn = 0.2f;         // Turnrate integral time constant taui_t (s)
+float turnErr_prev = 0.0f;            // e_turn(k-1)
+float turnInt = 0.0f;                 // tr_i(k-1)
+float headU = 0.0f;                   // Velocity difference u = tr_u * (B/2) (m/s)
 
 // ////////////////////////////////////////
 // define a structure for log elements
@@ -104,13 +129,19 @@ void printLog()
   // Columns
   Serial.println("% 1 time (sec)");
   Serial.println("% 2 state");
-  Serial.println("% 3   Desired value");
+  Serial.println("% 3   Desired velocity (m/s)");
   Serial.println("% 4-5 motor voltage (left,right) (V)");
   Serial.println("% 6-7 Encoder count (left, right)");
   Serial.println("% 8-9 motor vel (left, right) (rad/s)");
   Serial.println("% 10  Battery voltage (V)");
-  Serial.println("% 11-13 gyro (x,y,z) (rad/s)");
+  Serial.println("% 11-13 gyro (x,y,z) (deg/s)");
   Serial.println("% 14-15 motor current  (A)");
+  Serial.println("% 16  Forward velocity poseVel[0] (m/s)");
+  Serial.println("% 17  Turnrate poseVel[1] (rad/s)");
+  Serial.println("% 18  Distance distA (m)");
+  Serial.println("% 19  Heading pose[2] (rad)");
+  Serial.println("% 20-21 Position x, y (pose[0], pose[1]) (m)");
+  Serial.println("% 22  Turnrate controller output headU (m/s)");
 
   if (logsCnt == 0)
   {
@@ -130,11 +161,18 @@ void printLog()
     Serial.print(" ");    Serial.print(d->motorVel[0],2);  // 8 (rad/s)
     Serial.print(" ");    Serial.print(d->motorVel[1],2);  // 9 (rad/s)
     Serial.print(" ");    Serial.print(d->battery,2);      // 10 (V)
-    Serial.print(" ");    Serial.print(d->gyro[0],2);      // 11 (rad/s)
-    Serial.print(" ");    Serial.print(d->gyro[1],2);      // 12 (rad/s)
-    Serial.print(" ");    Serial.print(d->gyro[2],2);      // 13 (rad/s)
+    Serial.print(" ");    Serial.print(d->gyro[0],2);      // 11 (deg/s)
+    Serial.print(" ");    Serial.print(d->gyro[1],2);      // 12 (deg/s)
+    Serial.print(" ");    Serial.print(d->gyro[2],2);      // 13 (deg/s)
     Serial.print(" ");    Serial.print(d->motorCurrent[0],4);  // 14 (A)
     Serial.print(" ");    Serial.print(d->motorCurrent[1],4);  // 15 (A)
+    Serial.print(" ");    Serial.print(d->poseVel[0],4);       // 16 v (m/s)
+    Serial.print(" ");    Serial.print(d->poseVel[1],4);       // 17 turnrate (rad/s)
+    Serial.print(" ");    Serial.print(d->distA,4);            // 18 distance (m)
+    Serial.print(" ");    Serial.print(d->pose[2],4);          // 19 heading (rad)
+    Serial.print(" ");    Serial.print(d->pose[0],4);          // 20 x (m)
+    Serial.print(" ");    Serial.print(d->pose[1],4);          // 21 y (m)
+    Serial.print(" ");    Serial.print(d->headU,4);            // 22 headU (m/s)
     Serial.println("");
     d++;
   }
@@ -166,13 +204,40 @@ void reset();
  * Global variables for state machine */
 int state = 0;               // actual sequence state
 float endTime = 0;           // for current state
-float desiredValue = 0;      // desired (reference) value send to controller
-float desiredHeading = 0;
+float desiredValue = 0;      // desired forward velocity reference (m/s)
+float desiredHeading = 0;    // desired turnrate reference (rad/s)
+
+/**
+ * Reset all integrators and memory variables before a new run */
+void reset()
+{
+  distA = 0.0f;
+  for (int i = 0; i < 4; i++) pose[i] = 0.0f;
+  poseVel[0] = 0.0f;
+  poseVel[1] = 0.0f;
+  poseVel_prev[0] = 0.0f;
+  poseVel_prev[1] = 0.0f;
+  vx_prev = 0.0f;
+  vy_prev = 0.0f;
+
+  velErr_prev[0] = 0.0f;
+  velErr_prev[1] = 0.0f;
+  velInt[0] = 0.0f;
+  velInt[1] = 0.0f;
+  inVelLeft = 0.0f;
+  inVelRight = 0.0f;
+
+  turnErr_prev = 0.0f;
+  turnInt = 0.0f;
+  headU = 0.0f;
+  velSaturated = false;
+}
 
 void start()
 { // Start timing
-  // reset log and encoders
+  // reset log, encoders, pose and controller integrators
   logsCnt = 0;
+  reset();
   // Set experiment PWM frequency
   motor.setPWMfrq(experimentPWMfrq);
   time_sec = 0;
@@ -187,6 +252,7 @@ void stop(float after)
 { // stop, but allow continued logging for a while
   state = 2;
   desiredValue = 0;
+  desiredHeading = 0;
   // end log after an additional short time
   endTime = time_sec + after;
 }
@@ -203,6 +269,48 @@ void finished()
   // wait for next button press
   state = 0;
   printLog();
+}
+
+/**
+ * =========================================================================
+ * SCHRITT 2: Odometrie & Pose-Berechnung mit Tustin-Integratoren (Folie 9)
+ * =========================================================================
+ * Formel fuer jeden 1/s Integratorblock:
+ *   y = T/2 * (x + x1) + y1;
+ *   x1 = x;
+ *   y1 = y;
+ */
+void updatePose()
+{
+  float T = sampleTimeUs * 1e-6f; // Sample time in seconds (0.001 s)
+
+  // 1) Umrechnung Motor-Winkelgeschwindigkeit (rad/s) -> Radgeschwindigkeit (m/s)
+  // Achtung: Linker Motor [0] ist umgekehrt eingebaut, daher Minuszeichen!
+  float vLeft  = (-encoder.motorVelocity[0] / gear) * wheelRadius;
+  float vRight = ( encoder.motorVelocity[1] / gear) * wheelRadius;
+
+  // 2) Vorwaertsgeschwindigkeit v (m/s) und Drehrate turnrate (rad/s)
+  poseVel[0] = 0.5f * (vRight + vLeft);       // v = (vR + vL) / 2
+  poseVel[1] = (vRight - vLeft) / wheelBase;  // h_dot = (vR - vL) / B
+
+  // 3) Tustin-Integration fuer Distanz distA (m) und Heading pose[2] (rad)
+  distA   += (T * 0.5f) * (poseVel[0] + poseVel_prev[0]);
+  pose[2] += (T * 0.5f) * (poseVel[1] + poseVel_prev[1]);
+
+  // Aktuelle Eingangs-Werte fuer den naechsten Abtastschritt speichern (x1 = x)
+  poseVel_prev[0] = poseVel[0];
+  poseVel_prev[1] = poseVel[1];
+
+  // 4) Zerlegung in Weltkoordinaten (x_dot, y_dot) und Tustin-Integration fuer x, y
+  float vx = poseVel[0] * cosf(pose[2]);
+  float vy = poseVel[0] * sinf(pose[2]);
+
+  pose[0] += (T * 0.5f) * (vx + vx_prev); // x-Position (m)
+  pose[1] += (T * 0.5f) * (vy + vy_prev); // y-Position (m)
+
+  vx_prev = vx;
+  vy_prev = vy;
+  pose[3] = imu2.tilt;
 }
 
 /**
@@ -295,6 +403,10 @@ void spikeSequence()
 }
 
 
+/**
+ * =========================================================================
+ * SCHRITT 4: Fahrsequenz fuer "Driving Straight" (3s mit 0.33 m/s = 1 Meter)
+ * ========================================================================= */
 void SequenceTwoSteps()
 { // this function is called at every sample time
   // and should never wait in a loop.
@@ -313,43 +425,27 @@ void SequenceTwoSteps()
         // reset for new run
         start();
         // Prepare next state
-        desiredValue = 0; // reference value to the controller
+        desiredValue = 0.0f;   // 0 m/s
+        desiredHeading = 0.0f; // 0 rad/s turnrate
         // to get start the log with no velocity
-        endTime = time_sec + 0.100; // 100ms of zero, as current-offset baseline
+        endTime = time_sec + 0.100f; // 100ms of zero as baseline
         state = 10;
       }
       break;
     case 10: // Waiting for first step (zero velocity to log) to finish.
       if (time_sec > endTime)
-      { // change to next values - drive
-        desiredValue = 1.5;  // should be in meters/sec, but is motor voltage for now,
-        endTime = time_sec + 0.48 ; // ~ 0.5 second
-        state = 11;
-      }
-      break;
-    case 11: // First step
-      // test if ready for next state
-      if (time_sec > endTime)
-      { // change to next values
-        desiredValue = 3;
-        endTime = time_sec + 0.50;
-        state = 12;
-      }
-      break;
-    case 12: // Second step
-      // test if this state is finished
-      if (time_sec > endTime)
-      { // change to next values
-        desiredValue = 6;
-        endTime = time_sec + 0.5;
+      { // Drive straight at 0.33 m/s for 3.0 seconds (~1.0 meter distance)
+        desiredValue = 0.33f;   // forward velocity reference in m/s
+        desiredHeading = 0.0f;  // turnrate reference in rad/s (0 = straight)
+        endTime = time_sec + 3.0f;
         state = 100;
       }
       break;
-    case 100: // Maintain last step
+    case 100: // Maintain step until 3.0 seconds are over
       // stop after end time
       if (time_sec > endTime)
       { // stop, but continue logging for a while (0.3 sec)
-        stop(0.3); // actually sets state to 999 (i.e. default:)
+        stop(0.3f); // sets desiredValue = 0 and logs braking for 0.3s
       }
       break;
     default: // Hold until finished
@@ -361,23 +457,115 @@ void SequenceTwoSteps()
 }
 
 /**
- * make the control */
+ * =========================================================================
+ * SCHRITT 3: Kaskadenregelung in controlUpdate() (Folie 13-15)
+ *   1) Aeusserer Turnrate-PI-Regler (Tustin + Anti-Windup)
+ *   2) Innere Motor-Geschwindigkeits-PI-Regler (Tustin + 9V Anti-Windup)
+ * ========================================================================= */
 void controlUpdate()
 { // do control during a mission only.
   // called at every tick
-  //
-  float velRef = desiredValue;
-  //
-  // For a start, the desiredValue
-  // is just used as motor voltage
-  //
-  // Left motor voltage (-9V to +9V)
-  motor.motorVoltage[0] = -velRef;
-  // Right motor voltage (-9V to +9V)
-  motor.motorVoltage[1] = velRef;
-  //
-  // in the main loop, there is a motor.tick() that actually send the
-  // values to the motor.
+  float T = sampleTimeUs * 1e-6f; // Sample time Ts in seconds (0.001 s)
+
+  float velRef  = desiredValue;   // Desired forward velocity v_ref (m/s)
+  float turnRef = desiredHeading; // Desired turnrate h_dot_ref (rad/s)
+
+  // -----------------------------------------------------------------------
+  // TEIL A: Aeusserer Turnrate-PI-Regler (Week 7, Slide 13 & 14)
+  // -----------------------------------------------------------------------
+  if (useTurnrateControl)
+  {
+    // Auswahl des Drehraten-Sensors: Encoder (poseVel[1]) oder IMU Gyro Z (in rad/s)
+    float turnMeas = useImuTurnrate ? (imu2.gyro[2] * float(M_PI) / 180.0f) : poseVel[1];
+
+    // 1. Regelfehler e_turn = h_dot_ref - h_dot_meas
+    float e_turn = turnRef - turnMeas;
+
+    // 2. P-Anteil: kp = Kpt * e_turn
+    float up_turn = Kp_turn * e_turn;
+
+    // 3. I-Anteil nach Tustin: tr_i(k) = tr_i(k-1) + (Kpt * Ts)/(2 * taui_t) * (e(k) + e(k-1))
+    // Anti-Windup: Nur weiter integrieren, wenn die Motoren nicht in der 9V-Saettigung sind!
+    if (!velSaturated)
+    {
+      turnInt += (Kp_turn * T / (2.0f * taui_turn)) * (e_turn + turnErr_prev);
+    }
+    turnErr_prev = e_turn;
+
+    // 4. Reglerausgang tr_u = kp + tr_i und Umrechnung mit B/2 in Geschwindigkeitsdifferenz u (m/s)
+    float tr_u = up_turn + turnInt;
+    headU = tr_u * (wheelBase * 0.5f);
+  }
+  else
+  {
+    // Open-Loop Vorsteuerung wie in Woche 6 (ohne Turnrate-Regler)
+    headU = turnRef * (wheelBase * 0.5f);
+  }
+
+  // Aufteilung auf linkes und rechtes Rad (Inverse Kinematik)
+  inVelLeft  = velRef - headU; // (m/s)
+  inVelRight = velRef + headU; // (m/s)
+
+  // -----------------------------------------------------------------------
+  // TEIL B: Innere Motor-PI-Regler fuer linkes [0] und rechtes [1] Rad
+  // -----------------------------------------------------------------------
+  // Umrechnung Rad-Sollgeschwindigkeit (m/s) -> Motorwellen-Drehzahl (rad/s)
+  float wRef[2];
+  wRef[0] = inVelLeft  * (gear / wheelRadius);
+  wRef[1] = inVelRight * (gear / wheelRadius);
+
+  // Gemessene Motorwellen-Drehzahl (rad/s)
+  float wMeas[2];
+  wMeas[0] = -encoder.motorVelocity[0]; // Linker Motor laeuft rueckwaerts -> Vorzeichen drehen
+  wMeas[1] =  encoder.motorVelocity[1];
+
+  float uVolt[2] = {0.0f, 0.0f};
+  velSaturated = false; // Wird true, sobald mindestens ein Motor +/- 9V erreicht
+
+  for (int m = 0; m < 2; m++)
+  {
+    // 1. Regelfehler an der Motorwelle (rad/s)
+    float e_vel = wRef[m] - wMeas[m];
+
+    // 2. P-Anteil: u_P(k) = Kp * e(k)
+    float u_p = Kp_vel * e_vel;
+
+    // 3. Tustin-Zuwachs fuer I-Anteil: du_I = (Kp * Ts)/(2 * tau_i) * (e(k) + e(k-1))
+    float du_i = (Kp_vel * T / (2.0f * taui_vel)) * (e_vel + velErr_prev[m]);
+    float u_i_candidate = velInt[m] + du_i;
+
+    // 4. Gesamte Motorspannung vor Begrenzung
+    float u_total = u_p + u_i_candidate;
+
+    // 5. Spannungsbegrenzung (+/- 9V) & Anti-Windup (Clamping)
+    if (u_total > maxMotorVolt)
+    {
+      u_total = maxMotorVolt;
+      velSaturated = true;
+      // Nur integrieren, wenn der Fehler hilft, aus der oberen Saettigung herauszukommen
+      if (du_i < 0.0f) velInt[m] = u_i_candidate;
+    }
+    else if (u_total < -maxMotorVolt)
+    {
+      u_total = -maxMotorVolt;
+      velSaturated = true;
+      // Nur integrieren, wenn der Fehler hilft, aus der unteren Saettigung herauszukommen
+      if (du_i > 0.0f) velInt[m] = u_i_candidate;
+    }
+    else
+    {
+      // Nicht gesaettigt -> Integrator normal aktualisieren
+      velInt[m] = u_i_candidate;
+    }
+
+    // Fehler fuer naechsten Abtastschritt speichern
+    velErr_prev[m] = e_vel;
+    uVolt[m] = u_total;
+  }
+
+  // Motorspannungen an Hardware-Treiber uebergeben (-9V bis +9V)
+  motor.motorVoltage[0] = -uVolt[0]; // Linker Motor braucht umgekehrtes Vorzeichen
+  motor.motorVoltage[1] =  uVolt[1]; // Rechter Motor
 }
 
 void updateLog()
@@ -402,6 +590,14 @@ void updateLog()
     logs[logsCnt].motorCurrent[1] =  (analogRead(A0) - 2048) * 0.0045 - 0.275;
     logs[logsCnt].poseVel[0] = poseVel[0];
     logs[logsCnt].poseVel[1] = poseVel[1];
+    logs[logsCnt].distA = distA;
+    logs[logsCnt].pose[0] = pose[0];
+    logs[logsCnt].pose[1] = pose[1];
+    logs[logsCnt].pose[2] = pose[2];
+    logs[logsCnt].pose[3] = pose[3];
+    logs[logsCnt].inVelLeft = inVelLeft;
+    logs[logsCnt].inVelRight = inVelRight;
+    logs[logsCnt].headU = headU;
     // add more items as needed, NB! also the the struct definition at top.
     logs[logsCnt].gyro[0] = imu2.gyro[0];
     logs[logsCnt].gyro[1] = imu2.gyro[1];
@@ -440,7 +636,7 @@ void loop ( void )
       // read sensors
       imu2.tick();
       encoder.tick();
-      // updatePose();
+      updatePose();
 #if USE_SPIKE_SEQUENCE
       spikeSequence();
 #else
