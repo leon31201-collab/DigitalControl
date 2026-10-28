@@ -1,19 +1,57 @@
-function plotDriveStraight(logFile)
-% plotDriveStraight(logFile)
+function plotDriveStraight(logInput)
+% plotDriveStraight(logInput)
 % Plots the Week 7/8 "Driving Straight", Turnrate & Heading Control log from Basebot.
 % Compares Encoder vs. IMU Gyro Turnrate & Heading (as on Week 8 Slides 2 & 10).
-% If no logFile is given, automatically picks the newest non-empty log in logs/.
+%
+% Verwendung:
+%   plotDriveStraight                                   -> Zeigt Liste der device-monitor-YYMMDD-HHMMSS.log Dateien (Enter = neuestes)
+%   plotDriveStraight('device-monitor-261028-110939.log') -> Laedt direkt das angegebene Log
+%   plotDriveStraight('261028')                         -> Sucht automatisch nach '*261028*' im Ordner logs/
 
-if nargin < 1 || isempty(logFile)
-    files = dir(fullfile('logs', 'device-monitor-*.log'));
-    files = files([files.bytes] > 1000);
-    if isempty(files)
-        error('Keine nicht-leere Log-Datei im Ordner logs/ gefunden.');
+logFolder = 'logs';
+allLogs = dir(fullfile(logFolder, 'device-monitor-*.log'));
+% Nur nicht-leere Logs anzeigen (Mindestgroesse 1 kB)
+allLogs = allLogs([allLogs.bytes] > 1000);
+[~, sortIdx] = sort([allLogs.datenum], 'descend');
+allLogs = allLogs(sortIdx);
+
+if isempty(allLogs)
+    error('Keine nicht-leere device-monitor-*.log Datei im Ordner logs/ gefunden.');
+end
+
+if nargin < 1 || isempty(logInput)
+    fprintf('\n======================================================\n');
+    fprintf('  Verfuegbare Logs im Ordner %s/:\n', logFolder);
+    fprintf('------------------------------------------------------\n');
+    for i = 1:min(length(allLogs), 8)
+        fprintf('  [%d] %-35s (%.1f kB, %s)\n', ...
+            i, allLogs(i).name, allLogs(i).bytes/1024, allLogs(i).date);
     end
-    [~, idx] = max([files.datenum]);
-    logFile = fullfile('logs', files(idx).name);
-elseif ~exist(logFile, 'file') && exist(fullfile('logs', logFile), 'file')
-    logFile = fullfile('logs', logFile);
+    fprintf('======================================================\n');
+    userInput = strtrim(input('Log-Dateiname, Datum oder Nummer [1 = neuestes]: ', 's'));
+    if isempty(userInput)
+        logFile = fullfile(logFolder, allLogs(1).name);
+    elseif ~isnan(str2double(userInput)) && str2double(userInput) >= 1 && str2double(userInput) <= length(allLogs)
+        logFile = fullfile(logFolder, allLogs(str2double(userInput)).name);
+    else
+        matches = dir(fullfile(logFolder, ['*' userInput '*.log']));
+        if ~isempty(matches)
+            logFile = fullfile(logFolder, matches(1).name);
+        else
+            logFile = fullfile(logFolder, userInput);
+        end
+    end
+elseif exist(logInput, 'file')
+    logFile = logInput;
+elseif exist(fullfile(logFolder, logInput), 'file')
+    logFile = fullfile(logFolder, logInput);
+else
+    matches = dir(fullfile(logFolder, ['*' logInput '*.log']));
+    if ~isempty(matches)
+        logFile = fullfile(logFolder, matches(1).name);
+    else
+        error('Konnte keine Log-Datei zu "%s" finden.', logInput);
+    end
 end
 
 fprintf('Lese Log-Datei: %s\n', logFile);
@@ -28,8 +66,8 @@ for i = 1:numel(lines)
     s = replace(s, "ovf", "NaN");
     vals = str2double(split(s));
     if numel(vals) >= 22 && ~isnan(vals(1))
-        row = nan(1, 25);
-        nCols = min(numel(vals), 25);
+        row = nan(1, 27);
+        nCols = min(numel(vals), 27);
         row(1:nCols) = vals(1:nCols).';
         numData = [numData; row]; %#ok<AGROW>
     end
@@ -113,7 +151,6 @@ legend({'Distance', 'x (m)', 'y (m)'}, 'Location', 'best');
 subplot(3,2,6);
 plot(posX, posY, 'b-', 'LineWidth', 2); hold on;
 if hasGyroCols
-    dt = [0; diff(t)];
     xGyro = cumtrapz(t, vMeas .* cos(gyroHead));
     yGyro = cumtrapz(t, vMeas .* sin(gyroHead));
     plot(xGyro, yGyro, 'r--', 'LineWidth', 1.8);

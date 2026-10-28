@@ -538,7 +538,6 @@ void SequenceTwoSteps()
       break;
 
 #elif MISSION_MODE == 2
-    // --- MODE 2 (Folie 7 & 10): Driving a Square ---
     //   1) Fwd 0.75 m at 0.75 m/s (desiredHeading = 0 rad)
     //   2) 4 x: Turn 90 deg (+pi/2 rad) and Fwd 0.75 m at 0.75 m/s
     case 10:
@@ -555,7 +554,7 @@ void SequenceTwoSteps()
       // Check if robot has traveled 0.75 m on the current side
       if ((distA - stepStartDist) >= 0.75f)
       {
-        if (squareSide < 4)
+        if (squareSide < 3)
         {
           // 4 x: Turn 90 deg (+pi/2 rad) and drive another 0.75 m forward
           squareSide++;
@@ -576,7 +575,7 @@ void SequenceTwoSteps()
     case 15:
       if ((distA - stepStartDist) >= 0.75f)
       {
-        if (squareSide < 4)
+        if (squareSide < 3)
         {
           squareSide++;
           desiredHeading = squareSide * (float(M_PI) * 0.5f);
