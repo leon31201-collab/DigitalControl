@@ -9,7 +9,8 @@
 
 stepFile  = 'logs/device-monitor-260917-114607.log';
 spikeFile = 'logs/device-monitor-260917-120144.log';
-motor = 2;              % 1 = left, 2 = right (left current channel reads ~3x)
+motor = 1;              % 1 = left, 2 = right. Right current channel reads ~2x low
+                        % on Kim (R = 9 ohm vs 3-6 ohm for the class), so use left
 K     = 2*pi/48;        % rad per encoder count
 
 %% ---- steady state from the steps: R, Kb, V0 and D, Tc ---------------
@@ -39,17 +40,18 @@ R  = p(1);  Kb = p(2);  V0 = p(3);  Kt = Kb;
 p  = [ss(:,3), ones(numel(Vs),1)] \ (Kt*ss(:,2));
 D  = p(1);  Tc = p(2);
 
-%% ---- L from the current rise in each spike ---------------------------
-% The current is sampled before the new voltage is applied -> shift by 1.
-% Integrated: (V-V0)*(t-t0) - Kb*(theta-theta0) = R*int(i) + L*(i-i0), R known
-Ln = zeros(numel(on),1);
+%% ---- L from the current rise in each spike (lecture method) ---------
+% First order: time to 63.2% of the peak current, L = tau_e*R. The current
+% is sampled 0.5ms after the voltage is applied, so the first sample is t=0.5ms.
+% (The current sensor's output filter, tau ~0.29ms, is included in tau_e.)
+tauE = zeros(numel(on),1);
 for n = 1:numel(on)
-    s  = on(n):off(n)-1;
-    c  = cs(s+1);
-    y  = (vs(s)-V0).*(ts(s)-ts(s(1))) - Kb*(es(s)-es(s(1)))*K - R*cumtrapz(ts(s), c);
-    Ln(n) = (c - c(1)) \ y;
+    c  = cs(on(n)+1 : off(n));  tc = (1:numel(c))' * mean(diff(ts));
+    j  = find(c >= 0.632*max(c), 1);
+    tauE(n) = interp1(c(j-1:j), tc(j-1:j), 0.632*max(c));
 end
-L = mean(Ln);
+Ln = tauE * R;
+L  = mean(Ln);
 
 %% ---- J from the mechanical time constant of the 3V and 6V steps ------
 % dw/dt = -(Kt*Kb/R + D)/J * w + ...  ->  J = tau*(Kt*Kb/R + D)

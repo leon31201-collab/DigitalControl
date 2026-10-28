@@ -4,7 +4,7 @@
 %              8-9 vel(L,R), 10 batt, 11-13 gyro, 14-15 current(L,R)
 
 file = 'logs/device-monitor-260917-120144.log';   % <- your spike log
-motor = 2;                                % 1 = left, 2 = right
+motor = 1;                                % 1 = left, 2 = right
 PPR = 48;                                 % encoder counts per motor rev
 
 dd = readmatrix(file, 'FileType', 'text', 'CommentStyle', '%');

@@ -42,9 +42,12 @@ void printLog();
  * =========================================================================
  * SCHRITT 1: Globale Einstellungen, Geometrie & Regler-Speicher (Tustin)
  * ========================================================================= */
-// 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (Driving straight test)
+// 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (Driving straight / Square test)
 #define USE_SPIKE_SEQUENCE 0
-// Sample time can not go lower than 300us (1000us = 1ms allows ~4.3s of logging)
+// 1 = plain P-controller per motor (lecture 5, the pstep_* sampling-time logs), 0 = PI cascade
+#define USE_P_CONTROL 0
+const float Kp_step = 0.03f;          // V per motor rad/s, same units as the Simulink model
+// Sample time can not go lower than 300us (1000us = 1ms)
 const uint32_t sampleTimeUs = 1000;   // Ts = 1 ms = 0.001 s
 // Default high PWM frequency (77824 Hz) for quiet, ripple-free operation
 const uint32_t experimentPWMfrq = 77824;
@@ -52,11 +55,11 @@ const uint32_t experimentPWMfrq = 77824;
 // Robot geometry configuration
 const float gear = 9.6;
 const float wheelRadius = 0.0315; // (m)
-const float wheelBase = 0.14;     // (m) distance B between left and right wheel
+const float wheelBase = 0.15;     // (m) distance B between left and right wheel, lecture 6 slide 8
 
 // Pose and kinematic state values
 float distA = 0;     // trip distance (m)
-float pose[4];       // [0]: x (m), [1]: y (m), [2]: heading h (rad), [3]: tilt (rad)
+float pose[4];       // [0]: x (m), [1]: y (m), [2]: heading h (rad), [3]: gyroHeading (rad)
 float poseVel[2];    // [0]: forward velocity v (m/s), [1]: turnrate h_dot (rad/s)
 bool velSaturated = false;
 
@@ -120,6 +123,7 @@ typedef struct
   float inVelLeft;
   float inVelRight;
   float gyro[3];
+  float encDelay[2];
   float headU;
   float accVel;
   float accTurn;
@@ -163,6 +167,7 @@ void printLog()
   Serial.println("% 23  Gyro turnrate Z tilt-compensated (rad/s)");
   Serial.println("% 24  Gyro heading integrated (rad)");
   Serial.println("% 25  Desired heading / turnrate reference");
+  Serial.println("% 26-27 velocity estimate delay (left, right) (ms)");
 
   if (logsCnt == 0)
   {
@@ -197,6 +202,8 @@ void printLog()
     Serial.print(" ");    Serial.print(d->accTurn,4);          // 23 gyroTurnrate (rad/s)
     Serial.print(" ");    Serial.print(d->pose[3],4);          // 24 gyroHeading (rad)
     Serial.print(" ");    Serial.print(d->desiredHeading,4);   // 25 desiredHeading (rad)
+    Serial.print(" ");    Serial.print(d->encDelay[0]*1000,2); // 26 (ms)
+    Serial.print(" ");    Serial.print(d->encDelay[1]*1000,2); // 27 (ms)
     Serial.println("");
     d++;
   }
@@ -229,7 +236,7 @@ void reset();
 int state = 0;               // actual sequence state
 float endTime = 0;           // for current state
 float desiredValue = 0;      // desired forward velocity reference (m/s)
-float desiredHeading = 0;    // desired turnrate reference (rad/s)
+float desiredHeading = 0;    // desired turnrate / heading reference
 
 /**
  * Reset all integrators and memory variables before a new run */
@@ -455,9 +462,9 @@ void spikeSequence()
 /**
  * =========================================================================
  * SCHRITT 4: Fahrsequenzen fuer Week 8 (MISSION_MODE 0, 1 oder 2)
- *   MISSION_MODE 0 (Default, Folie 11): 3.0s geradeaus mit 0.33 m/s (Heading = 0 rad)
+ *   MISSION_MODE 0 (Folie 11): 3.0s geradeaus mit 0.33 m/s (Heading = 0 rad)
  *   MISSION_MODE 1 (Folie 2): Schlenker-Test (0 rad -> -0.3 rad -> 0 rad)
- *   MISSION_MODE 2 (Folie 7): Quadrat fahren (4 x 90 Grad Drehung)
+ *   MISSION_MODE 2 (Default, Folie 7): Quadrat fahren (0.75m + 4 x 90 deg & 0.75m)
  * ========================================================================= */
 void SequenceTwoSteps()
 { // this function is called at every sample time
@@ -606,6 +613,17 @@ void controlUpdate()
   float velRef = desiredValue;    // Desired forward velocity v_ref (m/s)
   float turnRef = 0.0f;           // Desired turnrate h_dot_ref (rad/s)
 
+#if USE_P_CONTROL
+  // Plain P-controller on each motor in motor rad/s (lecture 5), no turnrate loop
+  float wP = velRef * (gear / wheelRadius);
+  float uL = constrain(Kp_step * (wP + encoder.motorVelocity[0]), -maxMotorVolt, maxMotorVolt);
+  float uR = constrain(Kp_step * (wP - encoder.motorVelocity[1]), -maxMotorVolt, maxMotorVolt);
+  motor.motorVoltage[0] = -uL; // Left motor runs backwards
+  motor.motorVoltage[1] =  uR;
+  (void)T; (void)turnRef;
+  return;
+#endif
+
   // -----------------------------------------------------------------------
   // TEIL A1 (Week 8, Folie 4-6): Aeusserer Heading-Regler (Winkelregelung)
   // -----------------------------------------------------------------------
@@ -727,7 +745,7 @@ void updateLog()
   {
     logTickCnt++;
 #if MISSION_MODE == 2
-    // Square mission takes ~6.2s -> log every 2nd sample (2ms = 500Hz) so full 7.1s fits in RAM!
+    // Square mission takes ~6.2s -> log every 2nd sample (2ms = 500Hz) so full 6.6s fits in RAM!
     if ((logTickCnt % 2) != 1) return;
 #endif
     // save data for this sample into dataLog structure
@@ -762,6 +780,8 @@ void updateLog()
     logs[logsCnt].gyro[0] = imu2.gyro[0];
     logs[logsCnt].gyro[1] = imu2.gyro[1];
     logs[logsCnt].gyro[2] = imu2.gyro[2];
+    logs[logsCnt].encDelay[0] = encoder.encoderDelay[0];
+    logs[logsCnt].encDelay[1] = encoder.encoderDelay[1];
     logsCnt++;
   }
 }
