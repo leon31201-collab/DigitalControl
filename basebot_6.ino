@@ -65,9 +65,12 @@ float poseVel_prev[2] = {0.0f, 0.0f}; // [0]: v(k-1), [1]: turnrate(k-1)
 float vx_prev = 0.0f;                 // vx(k-1) = v(k-1)*cos(h(k-1))
 float vy_prev = 0.0f;                 // vy(k-1) = v(k-1)*sin(h(k-1))
 
-// Inner Loop: Motor Velocity PI Controller Parameters (from piDesign.mat)
-const float Kp_vel = 0.2f;            // Proportional gain (V / (rad/s))
-const float taui_vel = 1.0f;          // Integral time constant (s)
+// Inner Loop: Motor Velocity PI Controller Parameters
+// Note: Due to gearbox backlash / tire compliance / wheels in air, the motor rotor
+// sees motor inertia Jm at ~33 Hz (w ~ 200 rad/s), where |G(jw)| ~ 19 (rad/s)/V.
+// Stability requires effective Kp_eff = Kp_vel * (1 + Kp_turn) < 1/19 = 0.05!
+const float Kp_vel = 0.02f;           // Proportional gain (V / (rad/s)) - rock-solid stability
+const float taui_vel = 0.04f;         // Integral time constant (s) - fast integral tracking (Ki = 0.5 V/rad)
 const float maxMotorVolt = 9.0f;      // Saturation limit (V)
 float velErr_prev[2] = {0.0f, 0.0f};  // e_vel(k-1) for [0]=left, [1]=right
 float velInt[2] = {0.0f, 0.0f};       // u_I(k-1) for [0]=left, [1]=right
@@ -75,10 +78,11 @@ float inVelLeft = 0.0f;               // Reference velocity left wheel (m/s)
 float inVelRight = 0.0f;              // Reference velocity right wheel (m/s)
 
 // Outer Loop: Turnrate PI Controller Parameters (Week 7, Slide 13 & 14)
+// With Kp_vel = 0.02 and Kp_turn = 0.5, Kp_eff = 0.02 * 1.5 = 0.03 < 0.05 (no 33 Hz oscillation!)
 bool useTurnrateControl = true;       // true = closed-loop turnrate PI active
 bool useImuTurnrate = false;          // false = encoder turnrate poseVel[1], true = IMU gyro Z
-const float Kp_turn = 5.0f;           // Turnrate proportional gain Kpt
-const float taui_turn = 0.2f;         // Turnrate integral time constant taui_t (s)
+const float Kp_turn = 0.5f;           // Turnrate proportional gain Kpt
+const float taui_turn = 0.15f;        // Turnrate integral time constant taui_t (s)
 float turnErr_prev = 0.0f;            // e_turn(k-1)
 float turnInt = 0.0f;                 // tr_i(k-1)
 float headU = 0.0f;                   // Velocity difference u = tr_u * (B/2) (m/s)
@@ -272,9 +276,9 @@ void finished()
 }
 
 /**
- * =========================================================================
- * SCHRITT 2: Odometrie & Pose-Berechnung mit Tustin-Integratoren (Folie 9)
- * =========================================================================
+ * ==============================================================
+ * SCHRITT 2: Odometrie & Pose-Berechnung mit Tustin-Integratoren 
+ * ==============================================================
  * Formel fuer jeden 1/s Integratorblock:
  *   y = T/2 * (x + x1) + y1;
  *   x1 = x;
@@ -405,7 +409,7 @@ void spikeSequence()
 
 /**
  * =========================================================================
- * SCHRITT 4: Fahrsequenz fuer "Driving Straight" (3s mit 0.33 m/s = 1 Meter)
+ * SCHRITT 4: Fahrsequenz für "Driving Straight" (3s mit 0.33 m/s = 1 Meter)
  * ========================================================================= */
 void SequenceTwoSteps()
 { // this function is called at every sample time
@@ -530,32 +534,24 @@ void controlUpdate()
     // 2. P-Anteil: u_P(k) = Kp * e(k)
     float u_p = Kp_vel * e_vel;
 
-    // 3. Tustin-Zuwachs fuer I-Anteil: du_I = (Kp * Ts)/(2 * tau_i) * (e(k) + e(k-1))
-    float du_i = (Kp_vel * T / (2.0f * taui_vel)) * (e_vel + velErr_prev[m]);
-    float u_i_candidate = velInt[m] + du_i;
+    // 3. Tustin-Zuwachs fuer I-Anteil: u_I(k) = u_I(k-1) + (Kp * Ts)/(2 * tau_i) * (e(k) + e(k-1))
+    velInt[m] += (Kp_vel * T / (2.0f * taui_vel)) * (e_vel + velErr_prev[m]);
 
-    // 4. Gesamte Motorspannung vor Begrenzung
-    float u_total = u_p + u_i_candidate;
+    // Anti-Windup (Integrator Clamping auf +/- 9V, genau wie in motorPI.slx)
+    if (velInt[m] > maxMotorVolt)  velInt[m] = maxMotorVolt;
+    if (velInt[m] < -maxMotorVolt) velInt[m] = -maxMotorVolt;
 
-    // 5. Spannungsbegrenzung (+/- 9V) & Anti-Windup (Clamping)
+    // 4. Gesamte Motorspannung u = u_P + u_I und Stellgroessenbegrenzung (+/- 9V)
+    float u_total = u_p + velInt[m];
     if (u_total > maxMotorVolt)
     {
       u_total = maxMotorVolt;
       velSaturated = true;
-      // Nur integrieren, wenn der Fehler hilft, aus der oberen Saettigung herauszukommen
-      if (du_i < 0.0f) velInt[m] = u_i_candidate;
     }
     else if (u_total < -maxMotorVolt)
     {
       u_total = -maxMotorVolt;
       velSaturated = true;
-      // Nur integrieren, wenn der Fehler hilft, aus der unteren Saettigung herauszukommen
-      if (du_i > 0.0f) velInt[m] = u_i_candidate;
-    }
-    else
-    {
-      // Nicht gesaettigt -> Integrator normal aktualisieren
-      velInt[m] = u_i_candidate;
     }
 
     // Fehler fuer naechsten Abtastschritt speichern
