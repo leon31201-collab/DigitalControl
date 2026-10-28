@@ -16,14 +16,13 @@ Gwc   = interp1(w, abs(Gtot), wc);
 Kp    = 1 / (Gwc * sqrt(1 + 1/Ni^2));   % |C(jwc)*Gtot(jwc)| = 1
 fprintf('\nwc = %.1f rad/s, tau_i = %.4f s, Kp = %.4f\n', wc, tau_i, Kp);
 
-% Tuned in simulation (Kp/tau_i sweep). The plant is almost an integrator
-% (mechanical pole ~1.7 rad/s), so the PI zero near wc gives ~25% overshoot,
-% made worse by the 8V saturation. A higher Kp with a slow integrator
-% (zero at 1 rad/s) settles in <0.1s with no overshoot; the integrator
-% only has to remove the friction/voltage offsets.
+% Tuned in simulation (Kp/tau_i sweep, 1s runs). With the robot mass the
+% plant is close to an integrator, so the PI zero from the design (N = 3)
+% gives ~14% overshoot, made worse by the 8V saturation. A higher Kp and a
+% slower integrator (zero at 2 rad/s) settles fast with ~2% overshoot.
 KpDesign = Kp;  tau_iDesign = tau_i;
-Kp    = 0.2;
-tau_i = 1.0;
+Kp    = 0.13;
+tau_i = 0.5;
 L_  = Kp*(1 + 1./(tau_i*jw)) .* Gtot;             % open loop with final PI
 kc  = find(abs(L_) < 1, 1);
 fprintf('final: crossover %.0f rad/s, phase margin %.0f deg, gain margin %.1f dB\n', ...

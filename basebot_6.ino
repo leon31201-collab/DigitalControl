@@ -42,17 +42,24 @@ void printLog();
  * Global variables */
 // 1 = spikeSequence (transient, R/L), 0 = SequenceTwoSteps (steady state)
 #define USE_SPIKE_SEQUENCE 0
+// 1 = velocityStep with the P-controller (lecture 5), 0 = open-loop voltage sequences
+#define USE_VELOCITY_STEP 1
 // Sample time can not go lower than 300us (exercise: 300 or 500us)
 const uint32_t sampleTimeUs = 1000;   // 20 samples inside a 10ms spike
 // const float ts = sampleTimeUs * 1e-6; // sample time in seconds
 // Robot configuration
 const float gear = 9.6;
 const float wheelRadius = 0.0315; // (m)
-const float wheelBase = 0.14;
+// P-controller (lecture 5), V per motor rad/s - same units as the Simulink model
+const float Kp = 0.03;
+const float maxVoltage = 9.0;  // V, the saturation in the Simulink model
+const float wheelBase = 0.15;   // (m), lecture 6 slide 8
+// Lecture 6, floor test: drive straight at this wheel velocity for this time
+const float driveVel = 0.33;    // (m/s)
+const float driveTime = 3.0;    // (s)
 // pose values
-float distA = 0; // trip distance
-float pose[4];
-float poseVel[2];
+float pose[4];     // x (m), y (m), heading (rad), distance (m)
+float poseVel[2];  // robot velocity (m/s), turn rate (rad/s)
 bool velSaturated = false;
 
 // ////////////////////////////////////////
@@ -69,11 +76,11 @@ typedef struct
   float motorCurrent[2];
   float battery;
   float pose[4];
-  float distA;
   float poseVel[2];
   float inVelLeft;
   float inVelRight;
   float gyro[3];
+  float encDelay[2];
   float headU;
   float accVel;
   float accTurn;
@@ -107,6 +114,9 @@ void printLog()
   Serial.println("% 10  Battery voltage (V)");
   Serial.println("% 11-13 gyro (x,y,z) (rad/s)");
   Serial.println("% 14-15 motor current  (A)");
+  Serial.println("% 16-17 velocity estimate delay (left, right) (ms)");
+  Serial.println("% 18-21 pose x (m), y (m), heading (rad), distance (m)");
+  Serial.println("% 22-23 robot velocity (m/s), turn rate (rad/s)");
 
   for (int i = 0; i < logsCnt; i++)
   {
@@ -126,6 +136,14 @@ void printLog()
     Serial.print(" ");    Serial.print(d->gyro[2],2);      // 13 (rad/s)
     Serial.print(" ");    Serial.print(d->motorCurrent[0],4);  // 14 (A)
     Serial.print(" ");    Serial.print(d->motorCurrent[1],4);  // 15 (A)
+    Serial.print(" ");    Serial.print(d->encDelay[0]*1000,2); // 16 (ms)
+    Serial.print(" ");    Serial.print(d->encDelay[1]*1000,2); // 17 (ms)
+    Serial.print(" ");    Serial.print(d->pose[0],4);      // 18 x (m)
+    Serial.print(" ");    Serial.print(d->pose[1],4);      // 19 y (m)
+    Serial.print(" ");    Serial.print(d->pose[2],4);      // 20 heading (rad)
+    Serial.print(" ");    Serial.print(d->pose[3],4);      // 21 distance (m)
+    Serial.print(" ");    Serial.print(d->poseVel[0],4);   // 22 velocity (m/s)
+    Serial.print(" ");    Serial.print(d->poseVel[1],4);   // 23 turn rate (rad/s)
     Serial.println("");
     d++;
   }
@@ -166,10 +184,14 @@ void start()
   logsCnt = 0;
   // NB! must not be an integer multiple of the sample rate, or every
   // analogRead() of the current lands on the same point of the PWM ripple.
-  motor.setPWMfrq(80000);
+  motor.setPWMfrq(77824);
   time_sec = 0;
   encoder.encoder[0] = 0; // left motor encoder
   encoder.encoder[1] = 0; // right motor encoder
+  for (int i = 0; i < 4; i++)
+    pose[i] = 0;
+  poseVel[0] = 0;
+  poseVel[1] = 0;
   // Update of display takes too long for fast sampling
   // so, disable during sequence.
   display.useDisplay = false;
@@ -287,6 +309,45 @@ void spikeSequence()
 }
 
 
+void velocityStep()
+{ // lecture 6: 0.2s of zero, then driveVel for driveTime (floor test)
+  // this function is called at every sample time
+  // and should never wait in a loop.
+  bool button;
+  switch (state)
+  {
+    case 0: // State 0 is just inactive, waiting for the start signal.
+      button = digitalReadFast(PIN_START_BUTTON);
+      if (button or robot.missionStart)
+      { // reset for new run
+        start();
+        desiredValue = 0;              // m/s
+        endTime = time_sec + 0.2;
+        state = 10;
+      }
+      break;
+    case 10: // zero reference
+      if (time_sec > endTime)
+      { // the step
+        desiredValue = driveVel;       // m/s
+        endTime = time_sec + driveTime;
+        state = 100;
+      }
+      break;
+    case 100: // hold the step
+      if (time_sec > endTime)
+      { // back to zero, but continue logging for a while (0.3 sec)
+        stop(0.3);
+      }
+      break;
+    default: // Hold until finished
+      // this state is needed to enable a new start
+      if (time_sec > endTime)
+        finished();
+      break;
+  }
+}
+
 void SequenceTwoSteps()
 { // this function is called at every sample time
   // and should never wait in a loop.
@@ -353,12 +414,42 @@ void SequenceTwoSteps()
 }
 
 /**
+ * Robot pose from left and right wheel velocity (lecture 6, exercise 2) */
+void updatePose()
+{
+  const float dt = sampleTimeUs * 1e-6;
+  // wheel velocity (m/s), positive is forward; the left motor runs backwards
+  float vLeft  = -encoder.motorVelocity[0] * wheelRadius / gear;
+  float vRight =  encoder.motorVelocity[1] * wheelRadius / gear;
+  poseVel[0] = (vLeft + vRight) / 2;          // robot velocity (m/s)
+  poseVel[1] = (vRight - vLeft) / wheelBase;  // turn rate (rad/s)
+  pose[2] += poseVel[1] * dt;                 // heading (rad)
+  pose[0] += poseVel[0] * cosf(pose[2]) * dt; // x (m)
+  pose[1] += poseVel[0] * sinf(pose[2]) * dt; // y (m)
+  pose[3] += poseVel[0] * dt;                 // distance (m)
+}
+
+/**
  * make the control */
 void controlUpdate()
 { // do control during a mission only.
   // called at every tick
   //
   float velRef = desiredValue;
+#if USE_VELOCITY_STEP
+  // P-controller on each motor, in motor rad/s (lecture 5).
+  // desiredValue is the wheel velocity in m/s.
+  velRef = desiredValue * gear / wheelRadius;
+  // Measured motor velocity (positive is forward)
+  float velLeft  = -encoder.motorVelocity[0];
+  float velRight =  encoder.motorVelocity[1];
+  float uLeft  = constrain(Kp * (velRef - velLeft),  -maxVoltage, maxVoltage);
+  float uRight = constrain(Kp * (velRef - velRight), -maxVoltage, maxVoltage);
+  // Left motor voltage, the left motor runs backwards, therefore the sign.
+  motor.motorVoltage[0] = -uLeft;
+  // Right motor voltage
+  motor.motorVoltage[1] = uRight;
+#else
   //
   // For a start, the desiredValue
   // is just used as motor voltage
@@ -367,6 +458,7 @@ void controlUpdate()
   motor.motorVoltage[0] = -velRef;
   // Right motor voltage (-9V to +9V)
   motor.motorVoltage[1] = velRef;
+#endif
   //
   // in the main loop, there is a motor.tick() that actually send the
   // values to the motor.
@@ -394,10 +486,14 @@ void updateLog()
     logs[logsCnt].motorCurrent[1] =  (analogRead(A0) - 2048) * 0.0045 - 0.275;
     logs[logsCnt].poseVel[0] = poseVel[0];
     logs[logsCnt].poseVel[1] = poseVel[1];
+    for (int i = 0; i < 4; i++)
+      logs[logsCnt].pose[i] = pose[i];
     // add more items as needed, NB! also the the struct definition at top.
     logs[logsCnt].gyro[0] = imu2.gyro[0];
     logs[logsCnt].gyro[1] = imu2.gyro[1];
     logs[logsCnt].gyro[2] = imu2.gyro[2];
+    logs[logsCnt].encDelay[0] = encoder.encoderDelay[0];
+    logs[logsCnt].encDelay[1] = encoder.encoderDelay[1];
     logsCnt++;
   }
 }
@@ -432,8 +528,10 @@ void loop ( void )
       // read sensors
       imu2.tick();
       encoder.tick();
-      // updatePose();
-#if USE_SPIKE_SEQUENCE
+      updatePose();
+#if USE_VELOCITY_STEP
+      velocityStep();
+#elif USE_SPIKE_SEQUENCE
       spikeSequence();
 #else
       SequenceTwoSteps();

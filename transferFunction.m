@@ -20,12 +20,13 @@ fprintf('J motor = %.3e, J robot = %.3e, J total = %.3e kg m^2\n', Jm, Jr, J);
 num = K;
 den = conv([L R], [J D]) + [0 0 K^2];
 
-% Measurement delay e^(-sT) is not rational -> 1st order Pade approximation
+% Measurement delay e^(-sT) is not rational -> 2nd order Pade approximation
+% (same as the lecture's pade(0.01, 2))
 T  = 0.010;
-pn = [-T/2 1];   pd = [T/2 1];                   % (1 - sT/2)/(1 + sT/2)
+pn = [T^2/12 -T/2 1];   pd = [T^2/12 T/2 1];   % (1 - sT/2 + (sT)^2/12)/(1 + sT/2 + (sT)^2/12)
 
 fprintf('G(s)    = %.4g / (%.3g s^2 + %.3g s + %.3g)\n', num, den);
-fprintf('Gtot(s) = G(s) * (1 - %.3g s)/(1 + %.3g s)\n', T/2, T/2);
+fprintf('Gtot(s) = G(s) * (1 - %.3g s + %.3g s^2)/(1 + %.3g s + %.3g s^2)\n', T/2, T^2/12, T/2, T^2/12);
 
 w     = logspace(0, 4, 4000);                    % rad/s
 jw    = 1i*w;
