@@ -834,6 +834,24 @@ void loop ( void )
       // support functions
       robot.tick();   // measure battery voltage etc.
       display.tick(); // update O-LED display
+
+      // Auto-send log when USB Serial Monitor is connected/reconnected after a floor run!
+      static bool wasSerialConnected = false;
+      static int serialConnectDelayTicks = 0;
+      bool isSerialConnected = bool(Serial);
+      if (isSerialConnected && !wasSerialConnected)
+      {
+        serialConnectDelayTicks = 500; // wait 0.5s after Serial Monitor opens
+      }
+      wasSerialConnected = isSerialConnected;
+      if (serialConnectDelayTicks > 0)
+      {
+        serialConnectDelayTicks--;
+        if (serialConnectDelayTicks == 0 && state == 0 && logsCnt > 0)
+        {
+          printLog();
+        }
+      }
     }
     usb.tick(); // listen to incoming from USB
   }

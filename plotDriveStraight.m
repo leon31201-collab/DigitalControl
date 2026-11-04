@@ -5,8 +5,8 @@ function plotDriveStraight(logInput)
 %
 % Verwendung:
 %   plotDriveStraight                                   -> Zeigt Liste der device-monitor-YYMMDD-HHMMSS.log Dateien (Enter = neuestes)
-%   plotDriveStraight('device-monitor-261028-110939.log') -> Laedt direkt das angegebene Log
-%   plotDriveStraight('261028')                         -> Sucht automatisch nach '*261028*' im Ordner logs/
+%   plotDriveStraight('device-monitor-261021-105744.log') -> Laedt direkt das angegebene Log
+%   plotDriveStraight('261021')                         -> Sucht automatisch nach '*261021*' im Ordner logs/
 
 logFolder = 'logs';
 allLogs = dir(fullfile(logFolder, 'device-monitor-*.log'));
@@ -78,9 +78,11 @@ if isempty(numData)
 end
 
 t           = numData(:, 1);
+stateCol    = numData(:, 2);
 vRef        = numData(:, 3);
 uLeft       = numData(:, 4);
 uRight      = numData(:, 5);
+gyroZ_deg   = numData(:, 13);
 vMeas       = numData(:, 16);
 turnEnc     = numData(:, 17);
 distA       = numData(:, 18);
@@ -92,10 +94,25 @@ gyroTurn    = numData(:, 23);
 gyroHead    = numData(:, 24);
 headRef     = numData(:, 25);
 
+% Falls das Log noch aus 22 Spalten besteht (ohne Spalte 23-25),
+% berechnen wir Gyro-Turnrate und Gyro-Heading direkt aus Spalte 13 (gyro Z in deg/s)
+% mit 22 Grad Neigungskorrektur (Week 8 Slide 2) und Tustin-Integration:
+if all(isnan(gyroTurn)) && any(~isnan(gyroZ_deg))
+    idxStand = (stateCol == 10) & ~isnan(gyroZ_deg);
+    if any(idxStand)
+        gyroOffset = mean(gyroZ_deg(idxStand));
+    else
+        gyroOffset = gyroZ_deg(1);
+    end
+    gyroTurn = ((gyroZ_deg - gyroOffset) * (pi / 180)) / cosd(22);
+    gyroHead = cumtrapz(t, gyroTurn);
+end
+
 hasGyroCols = any(~isnan(gyroTurn));
 
 fig = figure('Name', ['Basebot Control Analysis: ' logFile], 'Color', 'w', ...
-             'Position', [80, 80, 1150, 780]);
+             'Position', [80, 80, 1200, 800]);
+try theme(fig, 'light'); catch, end
 
 % 1. Forward Velocity
 subplot(3,2,1);
@@ -131,7 +148,11 @@ end
 plot(t, headingEnc, 'g-', 'LineWidth', 1.5); hold on;
 if hasGyroCols
     plot(t, gyroHead, 'r-', 'LineWidth', 1.5);
-    legend({'Desired Heading', 'Heading Encoder (rad)', 'Heading Gyro (rad)'}, 'Location', 'best');
+    if any(~isnan(headRef))
+        legend({'Desired Heading', 'Heading Encoder (rad)', 'Heading Gyro (rad)'}, 'Location', 'best');
+    else
+        legend({'Heading Encoder (rad)', 'Heading Gyro (rad)'}, 'Location', 'best');
+    end
 else
     legend({'Heading Encoder (rad)'}, 'Location', 'best');
 end
