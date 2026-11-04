@@ -93,9 +93,9 @@ float inVelRight = 0.0f;              // Reference velocity right wheel (m/s)
 bool useHeadingControl = true;        // true = Week 8/9 Heading controller (desiredHeading in rad)
 bool useTurnrateControl = false;      // false = direct mixer into acc_limit_turn as on Week 9 Slide 9
 bool useImuTurnrate = true;           // true = use IMU gyro (gyroTurnrate & gyroHeading), false = encoder
-const float Kp_head = 6.0f;           // Heading proportional gain Kph ((rad/s) / rad)
-const float Kd_head = 0.45f;          // Heading derivative/lead damping on turnrate (prevents overshoot with acc_limit_turn!)
-const float maxTurnrate = 4.0f;       // Max commanded turnrate (rad/s) matching Slide 11 (~3.85 rad/s peak)
+const float Kp_head = 3.5f;           // Heading proportional gain Kph ((rad/s) / rad)
+const float Kd_head = 0.55f;          // Heading derivative/lead damping on turnrate (prevents overshoot with acc_limit_turn!)
+const float maxTurnrate = 3.2f;       // Max commanded turnrate (rad/s) so actual gyro turnrate peaks at ~3.8 rad/s (Slide 11)
 const float Kp_turn = 0.5f;           // Turnrate proportional gain Kpt
 const float taui_turn = 0.15f;        // Turnrate integral time constant taui_t (s)
 float turnErr_prev = 0.0f;            // e_turn(k-1)
@@ -363,17 +363,7 @@ void updatePose()
   poseVel_prev[0] = poseVel[0];
   poseVel_prev[1] = poseVel[1];
 
-  // 4) Zerlegung in Weltkoordinaten (x_dot, y_dot) und Tustin-Integration fuer x, y
-  float vx = poseVel[0] * cosf(pose[2]);
-  float vy = poseVel[0] * sinf(pose[2]);
-
-  pose[0] += (T * 0.5f) * (vx + vx_prev); // x-Position (m)
-  pose[1] += (T * 0.5f) * (vy + vy_prev); // y-Position (m)
-
-  vx_prev = vx;
-  vy_prev = vy;
-
-  // 5) Week 8 (Step 1): Gyroskop-Drehrate (rad/s) mit 22-Grad-Neigungskorrektur & Tustin-Heading
+  // 4) Week 8 (Step 1): Gyroskop-Drehrate (rad/s) mit 22-Grad-Neigungskorrektur & Tustin-Heading
   if (state == 10)
   { 
     gyroZ_offset = 0.95f * gyroZ_offset + 0.05f * imu2.gyro[2];
@@ -390,6 +380,18 @@ void updatePose()
     gyroTurnrate_prev = gyroTurnrate;
   }
   pose[3] = gyroHeading;
+
+  // 5) Zerlegung in Weltkoordinaten (x_dot, y_dot) und Tustin-Integration fuer x, y
+  //    Nutzt gyroHeading, wenn useImuTurnrate aktiv ist (verhindert Drift durch Radschlupf)
+  float hForXY = useImuTurnrate ? gyroHeading : pose[2];
+  float vx = poseVel[0] * cosf(hForXY);
+  float vy = poseVel[0] * sinf(hForXY);
+
+  pose[0] += (T * 0.5f) * (vx + vx_prev); // x-Position (m)
+  pose[1] += (T * 0.5f) * (vy + vy_prev); // y-Position (m)
+
+  vx_prev = vx;
+  vy_prev = vy;
 }
 
 /**
