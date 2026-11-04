@@ -90,11 +90,12 @@ float inVelRight = 0.0f;              // Reference velocity right wheel (m/s)
 // Outer Loop: Turnrate & Heading Controller Parameters (Week 7 & Week 8)
 // MISSION_MODE: 0 = Straight 1m (Slide 11), 1 = Swerve test (Slide 2), 2 = Square 0.75m at 0.75m/s (Slide 7)
 #define MISSION_MODE 2
-bool useHeadingControl = true;        // true = Week 8 Heading controller (desiredHeading in rad)
-bool useTurnrateControl = true;       // true = inner turnrate damping/PI active
+bool useHeadingControl = true;        // true = Week 8/9 Heading controller (desiredHeading in rad)
+bool useTurnrateControl = false;      // false = direct mixer into acc_limit_turn as on Week 9 Slide 9
 bool useImuTurnrate = true;           // true = use IMU gyro (gyroTurnrate & gyroHeading), false = encoder
-const float Kp_head = 5.0f;           // Heading proportional gain Kph ((rad/s) / rad)
-const float maxTurnrate = 5.0f;       // Max commanded turnrate (rad/s) for 90-deg turns at 0.75 m/s
+const float Kp_head = 6.0f;           // Heading proportional gain Kph ((rad/s) / rad)
+const float Kd_head = 0.45f;          // Heading derivative/lead damping on turnrate (prevents overshoot with acc_limit_turn!)
+const float maxTurnrate = 4.0f;       // Max commanded turnrate (rad/s) matching Slide 11 (~3.85 rad/s peak)
 const float Kp_turn = 0.5f;           // Turnrate proportional gain Kpt
 const float taui_turn = 0.15f;        // Turnrate integral time constant taui_t (s)
 float turnErr_prev = 0.0f;            // e_turn(k-1)
@@ -103,6 +104,18 @@ float headU = 0.0f;                   // Velocity difference u = tr_u * (B/2) (m
 float stepStartDist = 0.0f;           // Helper to measure distance per segment in multi-step missions
 int squareSide = 0;                   // Counter for 4 turns of the square mission
 int logTickCnt = 0;                   // Decimation counter so ~6.5s square mission fits in RAM log
+bool useAccLimit = true;              // true = Acceleration Limiter aktiv
+const float Kp_acc = 25.0f;           // P-Gain im Limiter-Block (Folie 10: "Kp 25?")
+const float maxAccVel = 2.0f;         // Max. Vorwaertsbeschleunigung (m/s^2, Folie 11: +2)
+const float maxAccTurn = 1.0f;        // Max. Drehbeschleunigung nach B/2 (m/s^2, Folie 11: +/-1)
+
+float accVel = 0.0f;                  // Aktuelle Vorwaertsbeschleunigung (m/s^2)
+float accVel_prev = 0.0f;             // accVel(k-1) fuer Tustin-Integrator
+float velLim = 0.0f;                  // Ausgang von acc_limit_vel: geglaettete Geschwindigkeit (m/s)
+
+float accTurn = 0.0f;                 // Aktuelle Drehbeschleunigung (m/s^2)
+float accTurn_prev = 0.0f;            // accTurn(k-1) fuer Tustin-Integrator
+float turnLim = 0.0f;                 // Ausgang von acc_limit_turn: geglaettetes headU (m/s)
 
 // ////////////////////////////////////////
 // define a structure for log elements
@@ -125,6 +138,7 @@ typedef struct
   float gyro[3];
   float encDelay[2];
   float headU;
+  float gyroTurnrate;
   float accVel;
   float accTurn;
 } LogData;
@@ -168,7 +182,7 @@ void printLog()
   Serial.println("% 24  Gyro heading integrated (rad)");
   Serial.println("% 25  Desired heading / turnrate reference");
   Serial.println("% 26-27 velocity estimate delay (left, right) (ms)");
-
+  Serial.println("% 28-29 Acceleration (forward, turn) (m/s^2)"); 
   if (logsCnt == 0)
   {
     Serial.println("% WARNING: Log is empty (0 samples). Type 'start' to run the sequence first!");
@@ -199,11 +213,13 @@ void printLog()
     Serial.print(" ");    Serial.print(d->pose[0],4);          // 20 x (m)
     Serial.print(" ");    Serial.print(d->pose[1],4);          // 21 y (m)
     Serial.print(" ");    Serial.print(d->headU,4);            // 22 headU (m/s)
-    Serial.print(" ");    Serial.print(d->accTurn,4);          // 23 gyroTurnrate (rad/s)
+    Serial.print(" ");    Serial.print(d->gyroTurnrate,4);     // 23 gyroTurnrate (rad/s)
     Serial.print(" ");    Serial.print(d->pose[3],4);          // 24 gyroHeading (rad)
     Serial.print(" ");    Serial.print(d->desiredHeading,4);   // 25 desiredHeading (rad)
     Serial.print(" ");    Serial.print(d->encDelay[0]*1000,2); // 26 (ms)
     Serial.print(" ");    Serial.print(d->encDelay[1]*1000,2); // 27 (ms)
+    Serial.print(" ");    Serial.print(d->accVel,4);           // 28 accVel (m/s^2)
+    Serial.print(" ");    Serial.print(d->accTurn,4);          // 29 accTurn (m/s^2)
     Serial.println("");
     d++;
   }
@@ -270,6 +286,13 @@ void reset()
   stepStartDist = 0.0f;
   squareSide = 0;
   logTickCnt = 0;
+
+  accVel = 0.0f;
+  accVel_prev = 0.0f;
+  velLim = 0.0f;
+  accTurn = 0.0f;
+  accTurn_prev = 0.0f;
+  turnLim = 0.0f;
 }
 
 void start()
@@ -554,7 +577,7 @@ void SequenceTwoSteps()
       // Check if robot has traveled 0.75 m on the current side
       if ((distA - stepStartDist) >= 0.75f)
       {
-        if (squareSide < 3)
+        if (squareSide < 4)
         {
           // 4 x: Turn 90 deg (+pi/2 rad) and drive another 0.75 m forward
           squareSide++;
@@ -575,7 +598,7 @@ void SequenceTwoSteps()
     case 15:
       if ((distA - stepStartDist) >= 0.75f)
       {
-        if (squareSide < 3)
+        if (squareSide < 4)
         {
           squareSide++;
           desiredHeading = squareSide * (float(M_PI) * 0.5f);
@@ -628,16 +651,18 @@ void controlUpdate()
   // -----------------------------------------------------------------------
   if (useHeadingControl)
   {
-    // Auswahl des Winkel-Sensors: Integriertes Gyro-Heading (gyroHeading) oder Encoder (pose[2])
+    // Auswahl des Winkel- und Drehraten-Sensors: IMU Gyro oder Encoder
     float headMeas = useImuTurnrate ? gyroHeading : pose[2];
+    float turnMeas = useImuTurnrate ? gyroTurnrate : poseVel[1];
 
     // 1. Winkelfehler e_head = h_ref - h_meas (in rad)
     float e_head = desiredHeading - headMeas;
 
-    // 2. Proportional-Regler Kph: berechnet gewuenschte Drehrate u_head (in rad/s)
-    turnRef = Kp_head * e_head;
+    // 2. PD/Lead-Heading-Regler (Folie 5/6 & 11): bremst rechtzeitig vor Erreichen der 90 Grad ab,
+    //    damit der Roboter trotz Begrenzung durch acc_limit_turn (-1 m/s^2) nicht ueberschwingt!
+    turnRef = Kp_head * e_head - Kd_head * turnMeas;
 
-    // 3. Drehraten-Begrenzung (verhindert Radschlupf bei grossen 90-Grad-Spruengen, Folie 10!)
+    // 3. Drehraten-Begrenzung (ca. 4.0 rad/s wie auf Folie 11)
     if (turnRef >  maxTurnrate) turnRef =  maxTurnrate;
     if (turnRef < -maxTurnrate) turnRef = -maxTurnrate;
   }
@@ -662,8 +687,9 @@ void controlUpdate()
     float up_turn = Kp_turn * e_turn;
 
     // 3. I-Anteil nach Tustin: tr_i(k) = tr_i(k-1) + (Kpt * Ts)/(2 * taui_t) * (e(k) + e(k-1))
-    // Anti-Windup: Nur weiter integrieren, wenn die Motoren nicht in der 9V-Saettigung sind!
-    if (!velSaturated)
+    // Anti-Windup: Nur weiter integrieren, wenn weder Motoren noch Turn-Acc-Limiter in Saettigung sind!
+    bool turnAccSaturated = useAccLimit && (fabsf(accTurn) >= maxAccTurn);
+    if (!velSaturated && !turnAccSaturated)
     {
       turnInt += (Kp_turn * T / (2.0f * taui_turn)) * (e_turn + turnErr_prev);
     }
@@ -680,9 +706,36 @@ void controlUpdate()
     headU = turnRef * (wheelBase * 0.5f);
   }
 
-  // Aufteilung auf linkes und rechtes Rad (Inverse Kinematik)
-  inVelLeft  = velRef - headU; // (m/s)
-  inVelRight = velRef + headU; // (m/s)
+    // -----------------------------------------------------------------------
+  // TEIL A3 (Week 9, Folie 9-10): Acceleration Limiters vor dem Mixer
+  // -----------------------------------------------------------------------
+  if (useAccLimit)
+  {
+    // 1) Vorwaerts-Limiter (acc_limit_vel): begrenzt Beschleunigung von velRef auf +/- maxAccVel
+    accVel = Kp_acc * (velRef - velLim);
+    if (accVel >  maxAccVel) accVel =  maxAccVel;
+    if (accVel < -maxAccVel) accVel = -maxAccVel;
+    // Tustin-Integrator (1/s): berechnet geglaettete Geschwindigkeit velLim
+    velLim += 0.5f * T * (accVel + accVel_prev);
+    accVel_prev = accVel;
+
+    // 2) Dreh-Limiter (acc_limit_turn): begrenzt Aenderung von headU (nach B/2) auf +/- maxAccTurn
+    accTurn = Kp_acc * (headU - turnLim);
+    if (accTurn >  maxAccTurn) accTurn =  maxAccTurn;
+    if (accTurn < -maxAccTurn) accTurn = -maxAccTurn;
+    // Tustin-Integrator (1/s): berechnet geglaettete Rad-Differenz turnLim
+    turnLim += 0.5f * T * (accTurn + accTurn_prev);
+    accTurn_prev = accTurn;
+  }
+  else
+  {
+    velLim  = velRef;
+    turnLim = headU;
+  }
+
+  // Mixer: Aufteilung der beschleunigungsbegrenzten Signale auf linkes und rechtes Rad
+  inVelLeft  = velLim - turnLim; // (m/s)
+  inVelRight = velLim + turnLim; // (m/s)
 
   // -----------------------------------------------------------------------
   // TEIL B: Innere Motor-PI-Regler fuer linkes [0] und rechtes [1] Rad
@@ -774,7 +827,9 @@ void updateLog()
     logs[logsCnt].inVelLeft = inVelLeft;
     logs[logsCnt].inVelRight = inVelRight;
     logs[logsCnt].headU = headU;
-    logs[logsCnt].accTurn = gyroTurnrate;
+    logs[logsCnt].gyroTurnrate = gyroTurnrate;
+    logs[logsCnt].accVel = accVel;
+    logs[logsCnt].accTurn = accTurn;
     // add more items as needed, NB! also the the struct definition at top.
     logs[logsCnt].gyro[0] = imu2.gyro[0];
     logs[logsCnt].gyro[1] = imu2.gyro[1];

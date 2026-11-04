@@ -66,8 +66,8 @@ for i = 1:numel(lines)
     s = replace(s, "ovf", "NaN");
     vals = str2double(split(s));
     if numel(vals) >= 22 && ~isnan(vals(1))
-        row = nan(1, 27);
-        nCols = min(numel(vals), 27);
+        row = nan(1, 29);
+        nCols = min(numel(vals), 29);
         row(1:nCols) = vals(1:nCols).';
         numData = [numData; row]; %#ok<AGROW>
     end
