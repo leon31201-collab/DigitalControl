@@ -71,6 +71,7 @@ float vy_prev = 0.0f;                 // vy(k-1) = v(k-1)*sin(h(k-1))
 // Week 8 (Step 1): Gyro-based turnrate (rad/s) and integrated gyro heading (rad)
 const float imuTiltRad = 22.0f * float(M_PI) / 180.0f; // ~22 deg mounting tilt of IMU board
 float gyroZ_offset = 0.0f;            // Standstill bias of imu2.gyro[2] (deg/s)
+bool gyroOffsetReady = false;         // Initialized during standstill in state == 0 before button press
 float gyroTurnrate = 0.0f;            // Tilt-compensated gyro turnrate (rad/s)
 float gyroTurnrate_prev = 0.0f;       // gyroTurnrate(k-1) for Tustin integration
 float gyroHeading = 0.0f;             // Integrated gyro heading h_gyro (rad)
@@ -115,6 +116,8 @@ const float maxAccTurn = 1.0f;        // Max. Drehbeschleunigung nach B/2 (m/s^2
 const float fp_L1        = 1.00f;     // Entry straight length (m)
 const float fp_L2        = 1.50f;     // Exit straight length (m)
 const float fp_R         = 0.50f;     // Circle radius (m), diameter = 1.0 m
+const float fp_xc        = 1.47697f;  // Circle center X: 1.00 + sqrt(0.50^2 - 0.15^2) (m)
+const float fp_yc        = 0.15000f;  // Circle center Y: 0.15 (m)
 const float fp_hTan1     = -1.26610f; // -(pi/2 - asin(0.15/0.50)) = -72.54 deg (rad)
 const float fp_dTheta    = 5.67380f;  // 2*pi - 2*asin(0.15/0.50)  = 325.08 deg (rad)
 const float fp_Larc      = 2.83690f;  // R * fp_dTheta (m)
@@ -122,8 +125,8 @@ const float fp_hTan2     = 4.40770f;  // fp_hTan1 + fp_dTheta = +252.54 deg (rad
 const float fp_hExit     = float(M_PI); // +180.0 deg (rad)
 const float fp_vStraight = 0.75f;     // Forward speed on straight segments (m/s)
 const float fp_vCircle   = 0.65f;     // Forward speed on circle (m/s)
-const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.025f * fp_vStraight;
-const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.025f * fp_vCircle;
+const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.050f * fp_vStraight;
+const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.050f * fp_vCircle;
 
 float accVel = 0.0f;                  // Aktuelle Vorwaertsbeschleunigung (m/s^2)
 float accVel_prev = 0.0f;             // accVel(k-1) fuer Tustin-Integrator
@@ -283,7 +286,13 @@ void reset()
   vx_prev = 0.0f;
   vy_prev = 0.0f;
 
-  gyroZ_offset = imu2.gyro[2];
+  // Do NOT overwrite gyroZ_offset with imu2.gyro[2] here, because pressing the physical
+  // start button creates a mechanical gyro spike right at t = 0!
+  if (!gyroOffsetReady)
+  {
+    gyroZ_offset = imu2.gyro[2];
+    gyroOffsetReady = true;
+  }
   gyroTurnrate = 0.0f;
   gyroTurnrate_prev = 0.0f;
   gyroHeading = 0.0f;
@@ -381,9 +390,31 @@ void updatePose()
   poseVel_prev[1] = poseVel[1];
 
   // 4) Week 8 (Step 1): Gyroskop-Drehrate (rad/s) mit 22-Grad-Neigungskorrektur & Tustin-Heading
-  if (state == 10)
+  if (state == 0)
+  {
+    // Continuously track true stationary gyro offset while robot sits untouched on the floor
+    // before the user presses the start button (immune to button-press vibration!)
+    if (!gyroOffsetReady)
+    {
+      gyroZ_offset = imu2.gyro[2];
+      gyroOffsetReady = true;
+    }
+    else if (fabsf(encoder.motorVelocity[0]) < 0.05f && fabsf(encoder.motorVelocity[1]) < 0.05f &&
+             fabsf(imu2.gyro[2] - gyroZ_offset) < 1.2f)
+    {
+      gyroZ_offset = 0.995f * gyroZ_offset + 0.005f * imu2.gyro[2];
+    }
+    gyroTurnrate = 0.0f;
+    gyroTurnrate_prev = 0.0f;
+    gyroHeading = 0.0f;
+  }
+  else if (state == 10)
   { 
-    gyroZ_offset = 0.95f * gyroZ_offset + 0.05f * imu2.gyro[2];
+    // Only refine gyroZ_offset if there is no mechanical button-release vibration
+    if (fabsf(imu2.gyro[2] - gyroZ_offset) < 0.8f)
+    {
+      gyroZ_offset = 0.98f * gyroZ_offset + 0.02f * imu2.gyro[2];
+    }
     gyroTurnrate = 0.0f;
     gyroTurnrate_prev = 0.0f;
     gyroHeading = 0.0f;
@@ -633,11 +664,11 @@ void SequenceTwoSteps()
 
 #elif MISSION_MODE == 3
     // --- MODE 3 (Lecture 10, Slide 3): Final Project "Keyhole" Course ---
-    // State 11: Straight 1.0 m (h_ref = 0 rad)
+    // State 11: Straight 1.0 m (h_ref = 0 rad, y_ref = 0 m)
     // State 12: Point turn right at P1 to -72.54 deg (-1.2661 rad)
-    // State 13: Circle (R = 0.50 m, L_arc = 2.837 m, h_ref = -1.2661 + s/0.50, w_ff = v/0.50)
+    // State 13: Circle (R = 0.50 m, L_arc = 2.837 m, center = (1.477, 0.150), w_ff = v_meas/0.50)
     // State 14: Point turn right at P2 to +180 deg (+pi rad)
-    // State 15: Straight 1.5 m (h_ref = pi rad) -> Stop
+    // State 15: Straight 1.5 m (h_ref = pi rad, y_ref = 0.30 m) -> Stop at x = -0.50 m
     case 10:
       if (time_sec > endTime)
       {
@@ -649,17 +680,18 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 11: // Segment 1: Entry Straight (1.0 m)
+    case 11: // Segment 1: Entry Straight (1.0 m along y = 0)
       {
         float s_seg = distA - stepStartDist;
-        desiredHeading = 0.0f;
+        desiredHeading = constrain(-2.0f * pose[1], -0.10f, 0.10f);
         turnRateFF = 0.0f;
         if (s_seg < (fp_L1 - fp_dBrakeStr))
           desiredValue = fp_vStraight;
         else
-          desiredValue = 0.0f; // Predictive braking onto corner P1
+          desiredValue = 0.0f; // Predictive braking onto corner P1 (x = 1.00 m)
 
-        if (s_seg >= (fp_L1 - 0.008f) || (s_seg > (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.03f))
+        // Wait until predictive braking has slowed the robot down (< 0.04 m/s) right at P1
+        if ((s_seg >= (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.04f) || s_seg >= (fp_L1 + 0.015f))
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hTan1; // -72.54 deg (-1.2661 rad)
@@ -676,7 +708,7 @@ void SequenceTwoSteps()
         turnRateFF = 0.0f;
         float hMeas = useImuTurnrate ? gyroHeading : pose[2];
         float wMeas = useImuTurnrate ? gyroTurnrate : poseVel[1];
-        if (fabsf(desiredHeading - hMeas) < 0.04f && fabsf(wMeas) < 0.45f)
+        if (fabsf(desiredHeading - hMeas) < 0.025f && fabsf(wMeas) < 0.25f)
         {
           stepStartDist = distA;
           desiredValue = fp_vCircle;
@@ -685,20 +717,32 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 13: // Segment 2: Circular Loop (R = 0.50 m, L_arc = 2.837 m)
+    case 13: // Segment 2: Circular Loop (R = 0.50 m, L_arc = 2.837 m, center = (1.477, 0.150))
       {
         float s_seg = distA - stepStartDist;
         if (s_seg < 0.0f) s_seg = 0.0f;
-        desiredHeading = fp_hTan1 + (s_seg / fp_R);
-        if (desiredHeading > fp_hTan2) desiredHeading = fp_hTan2;
-        turnRateFF = velLim / fp_R; // Curvature feedforward w_ff = v / R
+
+        // Nominal tangent angle along the arc + radial cross-track feedback onto R = 0.50 m circle
+        float h_nom = fp_hTan1 + (s_seg / fp_R);
+        if (h_nom > fp_hTan2) h_nom = fp_hTan2;
+        float dx = pose[0] - fp_xc;
+        float dy = pose[1] - fp_yc;
+        float r_err = sqrtf(dx * dx + dy * dy) - fp_R;
+        float h_rad_corr = constrain(2.0f * r_err, -0.15f, 0.15f);
+        desiredHeading = h_nom + h_rad_corr;
+
+        // Lock curvature feedforward w_ff = v_meas / R to actual forward speed poseVel[0]
+        // so curvature k = w/v = 1/R is exact during both acceleration and braking!
+        float vFwd = (poseVel[0] > 0.0f) ? poseVel[0] : 0.0f;
+        turnRateFF = vFwd / fp_R;
 
         if (s_seg < (fp_Larc - fp_dBrakeCir))
           desiredValue = fp_vCircle;
         else
-          desiredValue = 0.0f; // Predictive braking onto corner P2
+          desiredValue = 0.0f; // Predictive braking onto corner P2 (1.00, 0.30)
 
-        if (s_seg >= (fp_Larc - 0.008f) || (s_seg > (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.03f))
+        // Wait until predictive braking has brought the robot to a stop (< 0.04 m/s) at P2
+        if ((s_seg >= (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.04f) || s_seg >= (fp_Larc + 0.015f))
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hExit; // +180 deg (pi rad)
@@ -715,7 +759,7 @@ void SequenceTwoSteps()
         turnRateFF = 0.0f;
         float hMeas = useImuTurnrate ? gyroHeading : pose[2];
         float wMeas = useImuTurnrate ? gyroTurnrate : poseVel[1];
-        if (fabsf(desiredHeading - hMeas) < 0.04f && fabsf(wMeas) < 0.45f)
+        if (fabsf(desiredHeading - hMeas) < 0.025f && fabsf(wMeas) < 0.25f)
         {
           stepStartDist = distA;
           desiredValue = fp_vStraight;
@@ -724,17 +768,17 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 15: // Segment 3: Exit Straight (1.5 m) to Stop at x = -0.500 m
+    case 15: // Segment 3: Exit Straight (1.5 m along y = 0.30 m) to Stop at x = -0.500 m
       {
         float distToStop = pose[0] - (-0.500f); // Remaining distance to x_stop = -0.50 m
-        desiredHeading = fp_hExit;
+        desiredHeading = fp_hExit + constrain(2.0f * (pose[1] - 0.300f), -0.12f, 0.12f);
         turnRateFF = 0.0f;
-        if (distToStop > (fp_dBrakeStr + 0.015f))
+        if (distToStop > fp_dBrakeStr)
           desiredValue = fp_vStraight;
         else
           desiredValue = 0.0f; // Predictive braking right onto x = -0.500 m
 
-        if (distToStop <= 0.005f || (distToStop <= (fp_dBrakeStr + 0.015f) && fabsf(poseVel[0]) < 0.02f))
+        if (distToStop <= 0.005f || (distToStop <= fp_dBrakeStr && fabsf(poseVel[0]) < 0.02f))
         {
           stop(0.5f);
         }
