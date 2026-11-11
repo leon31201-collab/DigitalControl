@@ -87,9 +87,9 @@ float velInt[2] = {0.0f, 0.0f};       // u_I(k-1) for [0]=left, [1]=right
 float inVelLeft = 0.0f;               // Reference velocity left wheel (m/s)
 float inVelRight = 0.0f;              // Reference velocity right wheel (m/s)
 
-// Outer Loop: Turnrate & Heading Controller Parameters (Week 7 & Week 8)
-// MISSION_MODE: 0 = Straight 1m (Slide 11), 1 = Swerve test (Slide 2), 2 = Square 0.75m at 0.75m/s (Slide 7)
-#define MISSION_MODE 2
+// Outer Loop: Turnrate & Heading Controller Parameters (Week 7, 8, 9 & Final Project)
+// MISSION_MODE: 0 = Straight 1m, 1 = Swerve test, 2 = Square 0.75m, 3 = Final Project Keyhole Course
+#define MISSION_MODE 3
 bool useHeadingControl = true;        // true = Week 8/9 Heading controller (desiredHeading in rad)
 bool useTurnrateControl = false;      // false = direct mixer into acc_limit_turn as on Week 9 Slide 9
 bool useImuTurnrate = true;           // true = use IMU gyro (gyroTurnrate & gyroHeading), false = encoder
@@ -101,13 +101,29 @@ const float taui_turn = 0.15f;        // Turnrate integral time constant taui_t 
 float turnErr_prev = 0.0f;            // e_turn(k-1)
 float turnInt = 0.0f;                 // tr_i(k-1)
 float headU = 0.0f;                   // Velocity difference u = tr_u * (B/2) (m/s)
+float turnRateFF = 0.0f;              // Curvature feedforward turnrate w_ff = v/R (rad/s) for circle tracking
 float stepStartDist = 0.0f;           // Helper to measure distance per segment in multi-step missions
 int squareSide = 0;                   // Counter for 4 turns of the square mission
-int logTickCnt = 0;                   // Decimation counter so ~6.5s square mission fits in RAM log
+int logTickCnt = 0;                   // Decimation counter so ~6.5s square / ~11s keyhole mission fits in RAM log
 bool useAccLimit = true;              // true = Acceleration Limiter aktiv
 const float Kp_acc = 25.0f;           // P-Gain im Limiter-Block (Folie 10: "Kp 25?")
 const float maxAccVel = 2.0f;         // Max. Vorwaertsbeschleunigung (m/s^2, Folie 11: +2)
 const float maxAccTurn = 1.0f;        // Max. Drehbeschleunigung nach B/2 (m/s^2, Folie 11: +/-1)
+
+// Final Project "Keyhole" Course Geometry (Lecture 10, Slide 3):
+// 1.0m Straight -> Right turn -72.54 deg -> Circle (R=0.50m, L=2.837m) -> Right turn -72.54 deg -> 1.5m Straight
+const float fp_L1        = 1.00f;     // Entry straight length (m)
+const float fp_L2        = 1.50f;     // Exit straight length (m)
+const float fp_R         = 0.50f;     // Circle radius (m), diameter = 1.0 m
+const float fp_hTan1     = -1.26610f; // -(pi/2 - asin(0.15/0.50)) = -72.54 deg (rad)
+const float fp_dTheta    = 5.67380f;  // 2*pi - 2*asin(0.15/0.50)  = 325.08 deg (rad)
+const float fp_Larc      = 2.83690f;  // R * fp_dTheta (m)
+const float fp_hTan2     = 4.40770f;  // fp_hTan1 + fp_dTheta = +252.54 deg (rad)
+const float fp_hExit     = float(M_PI); // +180.0 deg (rad)
+const float fp_vStraight = 0.75f;     // Forward speed on straight segments (m/s)
+const float fp_vCircle   = 0.65f;     // Forward speed on circle (m/s)
+const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.025f * fp_vStraight;
+const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.025f * fp_vCircle;
 
 float accVel = 0.0f;                  // Aktuelle Vorwaertsbeschleunigung (m/s^2)
 float accVel_prev = 0.0f;             // accVel(k-1) fuer Tustin-Integrator
@@ -282,6 +298,7 @@ void reset()
   turnErr_prev = 0.0f;
   turnInt = 0.0f;
   headU = 0.0f;
+  turnRateFF = 0.0f;
   velSaturated = false;
   stepStartDist = 0.0f;
   squareSide = 0;
@@ -613,6 +630,116 @@ void SequenceTwoSteps()
         }
       }
       break;
+
+#elif MISSION_MODE == 3
+    // --- MODE 3 (Lecture 10, Slide 3): Final Project "Keyhole" Course ---
+    // State 11: Straight 1.0 m (h_ref = 0 rad)
+    // State 12: Point turn right at P1 to -72.54 deg (-1.2661 rad)
+    // State 13: Circle (R = 0.50 m, L_arc = 2.837 m, h_ref = -1.2661 + s/0.50, w_ff = v/0.50)
+    // State 14: Point turn right at P2 to +180 deg (+pi rad)
+    // State 15: Straight 1.5 m (h_ref = pi rad) -> Stop
+    case 10:
+      if (time_sec > endTime)
+      {
+        desiredValue = fp_vStraight;
+        desiredHeading = 0.0f;
+        turnRateFF = 0.0f;
+        stepStartDist = distA;
+        state = 11;
+      }
+      break;
+
+    case 11: // Segment 1: Entry Straight (1.0 m)
+      {
+        float s_seg = distA - stepStartDist;
+        desiredHeading = 0.0f;
+        turnRateFF = 0.0f;
+        if (s_seg < (fp_L1 - fp_dBrakeStr))
+          desiredValue = fp_vStraight;
+        else
+          desiredValue = 0.0f; // Predictive braking onto corner P1
+
+        if (s_seg >= (fp_L1 - 0.008f) || (s_seg > (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.03f))
+        {
+          desiredValue = 0.0f;
+          desiredHeading = fp_hTan1; // -72.54 deg (-1.2661 rad)
+          turnRateFF = 0.0f;
+          state = 12;
+        }
+      }
+      break;
+
+    case 12: // Corner 1: Point turn at P1 to circle tangent (-1.2661 rad)
+      {
+        desiredValue = 0.0f;
+        desiredHeading = fp_hTan1;
+        turnRateFF = 0.0f;
+        float hMeas = useImuTurnrate ? gyroHeading : pose[2];
+        float wMeas = useImuTurnrate ? gyroTurnrate : poseVel[1];
+        if (fabsf(desiredHeading - hMeas) < 0.04f && fabsf(wMeas) < 0.45f)
+        {
+          stepStartDist = distA;
+          desiredValue = fp_vCircle;
+          state = 13;
+        }
+      }
+      break;
+
+    case 13: // Segment 2: Circular Loop (R = 0.50 m, L_arc = 2.837 m)
+      {
+        float s_seg = distA - stepStartDist;
+        if (s_seg < 0.0f) s_seg = 0.0f;
+        desiredHeading = fp_hTan1 + (s_seg / fp_R);
+        if (desiredHeading > fp_hTan2) desiredHeading = fp_hTan2;
+        turnRateFF = velLim / fp_R; // Curvature feedforward w_ff = v / R
+
+        if (s_seg < (fp_Larc - fp_dBrakeCir))
+          desiredValue = fp_vCircle;
+        else
+          desiredValue = 0.0f; // Predictive braking onto corner P2
+
+        if (s_seg >= (fp_Larc - 0.008f) || (s_seg > (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.03f))
+        {
+          desiredValue = 0.0f;
+          desiredHeading = fp_hExit; // +180 deg (pi rad)
+          turnRateFF = 0.0f;
+          state = 14;
+        }
+      }
+      break;
+
+    case 14: // Corner 2: Point turn at P2 to exit straight (+pi rad)
+      {
+        desiredValue = 0.0f;
+        desiredHeading = fp_hExit;
+        turnRateFF = 0.0f;
+        float hMeas = useImuTurnrate ? gyroHeading : pose[2];
+        float wMeas = useImuTurnrate ? gyroTurnrate : poseVel[1];
+        if (fabsf(desiredHeading - hMeas) < 0.04f && fabsf(wMeas) < 0.45f)
+        {
+          stepStartDist = distA;
+          desiredValue = fp_vStraight;
+          state = 15;
+        }
+      }
+      break;
+
+    case 15: // Segment 3: Exit Straight (1.5 m) to Stop at x = -0.500 m
+      {
+        float distToStop = pose[0] - (-0.500f); // Remaining distance to x_stop = -0.50 m
+        desiredHeading = fp_hExit;
+        turnRateFF = 0.0f;
+        if (distToStop > (fp_dBrakeStr + 0.015f))
+          desiredValue = fp_vStraight;
+        else
+          desiredValue = 0.0f; // Predictive braking right onto x = -0.500 m
+
+        if (distToStop <= 0.005f || (distToStop <= (fp_dBrakeStr + 0.015f) && fabsf(poseVel[0]) < 0.02f))
+        {
+          stop(0.5f);
+        }
+      }
+      break;
 #endif
 
     default: // Hold until finished
@@ -660,11 +787,17 @@ void controlUpdate()
     // 1. Winkelfehler e_head = h_ref - h_meas (in rad)
     float e_head = desiredHeading - headMeas;
 
-    // 2. PD/Lead-Heading-Regler (Folie 5/6 & 11): bremst rechtzeitig vor Erreichen der 90 Grad ab,
-    //    damit der Roboter trotz Begrenzung durch acc_limit_turn (-1 m/s^2) nicht ueberschwingt!
-    turnRef = Kp_head * e_head - Kd_head * turnMeas;
+    // 2. PD/Lead-Heading-Regler + Kreis-Vorsteuerung turnRateFF (w_ff = v/R):
+    //    Bei Standdrehungen (State 12 & 14) geringere D-Daempfung + Mindest-Drehrate gegen Caster-Reibung!
+    bool isPointTurn = (MISSION_MODE == 3) && (state == 12 || state == 14);
+    float kd_eff = isPointTurn ? 0.22f : Kd_head;
+    turnRef = turnRateFF + Kp_head * e_head - kd_eff * (turnMeas - turnRateFF);
+    if (isPointTurn && fabsf(e_head) > 0.04f && fabsf(turnRef) < 0.60f)
+    {
+      turnRef = (e_head > 0.0f) ? 0.60f : -0.60f;
+    }
 
-    // 3. Drehraten-Begrenzung (ca. 4.0 rad/s wie auf Folie 11)
+    // 3. Drehraten-Begrenzung (ca. 3.2 rad/s)
     if (turnRef >  maxTurnrate) turnRef =  maxTurnrate;
     if (turnRef < -maxTurnrate) turnRef = -maxTurnrate;
   }
@@ -801,6 +934,9 @@ void updateLog()
 #if MISSION_MODE == 2
     // Square mission takes ~6.2s -> log every 2nd sample (2ms = 500Hz) so full 6.6s fits in RAM!
     if ((logTickCnt % 2) != 1) return;
+#elif MISSION_MODE == 3
+    // Final Project Keyhole mission takes ~11s -> log every 4th sample (4ms = 250Hz) so up to 13.8s fits in RAM!
+    if ((logTickCnt % 4) != 1) return;
 #endif
     // save data for this sample into dataLog structure
     logs[logsCnt].time = time_sec;

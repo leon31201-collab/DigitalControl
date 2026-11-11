@@ -241,5 +241,87 @@ else
 end
 legend(legEntries, 'Location', 'northwest');
 saveas(figSlide, fullfile('figures', 'latest_slide11.png'));
+
+% Falls es ein Final-Project Keyhole-Lauf ist (Gesamtstrecke > 4.2 m),
+% erstelle zusaetzlich den offiziellen Final-Project-Plot mit Score P_i = t_i + d_max!
+if max(distA) > 4.2
+    L1 = 1.00; L2 = 1.50; R_circ = 0.50; d_gap = 0.30;
+    alpha = asin((d_gap / 2) / R_circ);
+    xC = L1 + sqrt(R_circ^2 - (d_gap/2)^2);
+    yC = d_gap / 2;
+    s1_vec = linspace(0, L1, 500)';
+    phi_vec = linspace(-pi + alpha, pi - alpha, 1500)';
+    s3_vec = linspace(0, L2, 750)';
+    x_track = [s1_vec; xC + R_circ * cos(phi_vec); L1 - s3_vec];
+    y_track = [zeros(size(s1_vec)); yC + R_circ * sin(phi_vec); d_gap * ones(size(s3_vec))];
+
+    dev_cm = zeros(numel(t), 1);
+    for k = 1:numel(t)
+        dev_cm(k) = min(hypot(x_track - posX(k), y_track - posY(k))) * 100;
+    end
+    d_max_cm = max(dev_cm);
+    idxStop = find(stateCol == 2, 1, 'first');
+    if ~isempty(idxStop)
+        tFinish = t(idxStop) - 0.10;
+    else
+        tFinish = t(end) - 0.10;
+    end
+    P_score = tFinish + d_max_cm;
+
+    figFP = figure('Name', ['Final Project Real Robot: ' logFile], 'Color', 'w', ...
+                   'Position', [50, 50, 1320, 760]);
+    try theme(figFP, 'light'); catch, end
+
+    subplot(2, 3, [1 4]);
+    plot(-y_track, x_track, 'k-', 'LineWidth', 5.0); hold on;
+    plot(-yEnc, xEnc, 'b:', 'LineWidth', 1.6);
+    plot(-posY, posX, 'r--', 'LineWidth', 2.2);
+    plot(0, 0, 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+    plot(-posY(end), posX(end), 'rs', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+    grid on; axis equal;
+    xlim([-0.85, 0.55]); ylim([-0.65, 2.15]);
+    xlabel('Lateral Position -y (m)'); ylabel('Forward Position x (m)');
+    title(sprintf('Real Robot Keyhole Run (t_i = %.2f s, d_{max} = %.2f cm, P_i = %.2f)', ...
+                  tFinish, d_max_cm, P_score));
+    legend({'Black Marking (Target)', 'Encoder Odometry', 'Gyro Trajectory (Real)', 'Start', 'Stop'}, ...
+           'Location', 'southwest');
+
+    subplot(2, 3, 2);
+    plot(t, vRef, 'k--', 'LineWidth', 1.4); hold on;
+    plot(t, vMeas, 'b-', 'LineWidth', 1.4);
+    if hasAccCols, plot(t, accVel, 'r-', 'LineWidth', 1.0); end
+    grid on; xlabel('Time (s)'); ylabel('v (m/s) / a (m/s^2)');
+    title('Forward Velocity & Acc Limiter');
+    legend({'v_{ref}', 'v_{meas}', 'acc_{vel}'}, 'Location', 'best');
+
+    subplot(2, 3, 3);
+    plot(t, headRef, 'k--', 'LineWidth', 1.6); hold on;
+    plot(t, headingEnc, 'g-', 'LineWidth', 1.4);
+    plot(t, gyroHead, 'r-', 'LineWidth', 1.5);
+    grid on; xlabel('Time (s)'); ylabel('Heading (rad)');
+    title('Heading h(t): Reference vs. Encoder vs. Gyro');
+    legend({'Desired h_{ref}', 'Heading Enc', 'Heading Gyro'}, 'Location', 'northwest');
+
+    subplot(2, 3, 5);
+    plot(t, gyroTurn, 'Color', [0.49 0.18 0.56], 'LineWidth', 1.4); hold on;
+    if hasAccCols, plot(t, accTurn, 'Color', [0.85 0.33 0.10], 'LineWidth', 1.2); end
+    grid on; xlabel('Time (s)'); ylabel('rad/s / m/s^2');
+    title('Gyro Turnrate \omega(t) & Turn Acc Limiter');
+    legend({'Turnrate Gyro (rad/s)', 'acc_{turn} (m/s^2)'}, 'Location', 'best');
+
+    subplot(2, 3, 6);
+    yyaxis left;
+    plot(t, dev_cm, 'b-', 'LineWidth', 1.6);
+    ylabel('Track Deviation d(t) (cm)'); ylim([0, max(3.0, d_max_cm * 1.25)]);
+    yyaxis right;
+    plot(t, stateCol, 'k-', 'LineWidth', 1.2);
+    ylabel('Mission State (11..15)'); ylim([0, 18]);
+    grid on; xlabel('Time (s)');
+    title(sprintf('Track Deviation d(t) (Max = %.2f cm) & State', d_max_cm));
+
+    sgtitle(['DTU 34765 Final Project – Real Robot Telemetry (' strrep(logFile, '\', '/') ')']);
+    saveas(figFP, fullfile('figures', 'real_final_project.png'));
+    fprintf('Final Project Plot gespeichert unter: figures/real_final_project.png (P_i = %.2f)\n', P_score);
+end
 fprintf('Plots gespeichert unter: figures/latest_drive_straight.png und figures/latest_slide11.png\n');
 end
