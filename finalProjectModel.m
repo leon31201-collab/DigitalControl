@@ -15,10 +15,10 @@ here = fileparts(mfilename('fullpath'));
 if ~exist(fullfile(here, 'figures'), 'dir'), mkdir(fullfile(here, 'figures')); end
 
 %% 1. Load Basebot Motor & Controller Parameters
-load(fullfile(here, 'piDesign.mat'), 'R', 'L', 'K', 'J', 'D', 'T', 'Kp', 'tau_i');
+load(fullfile(here, 'piDesign.mat'), 'R', 'L', 'K', 'J', 'D', 'T');
 gear = 9.6;
-r    = 0.0335;      % Wheel radius (m) from basebot_6.ino (0.067 / 2)
-B    = 0.155;       % Wheelbase (m) from basebot_6.ino
+r    = 0.0315;      % Wheel radius (m), wheelRadius in basebot_6.ino
+B    = 0.15;        % Wheelbase (m), wheelBase in basebot_6.ino
 Vmax = 9.0;         % Motor voltage saturation (V)
 Ts   = 0.001;       % Sample period (1 ms)
 
@@ -28,9 +28,12 @@ Gd = c2d(ss(G_mot), Ts, 'zoh');
 Ad = Gd.A; Bd = Gd.B; Cd = Gd.C; Dd = Gd.D;
 nDelay = max(1, round(T / Ts));
 
-% Controller parameters matching basebot_6.ino & piDesign.mat
-Kp_vel      = Kp;
-taui_vel    = tau_i;
+% Controller parameters = basebot_6.ino (piDesign.mat holds the earlier
+% Kp = 0.13, tau_i = 0.5 design, which the firmware no longer uses)
+Kp_vel      = 0.02;
+taui_vel    = 0.04;
+Kd_turn     = 0.22; % Kd during point turns (states 12, 14)
+minTurn     = 0.60; % rad/s, minimum turnrate in point turns while |e| > 0.04 rad
 Kp_head     = 3.5;
 Kd_head     = 0.55;
 maxTurnrate = 3.2;
@@ -73,12 +76,12 @@ x_track = [x_ref1; x_ref2; x_ref3];
 y_track = [y_ref1; y_ref2; y_ref3];
 
 %% 3. Closed-Loop Simulation of SequenceFinalProject()
-vStraight = 0.80;   % Target speed on straight segments (m/s)
-vCircle   = 0.70;   % Target speed on R = 0.5 m circle (m/s) -> v^2/R = 0.98 m/s^2 (safe traction!)
+vStraight = 0.75;   % fp_vStraight (m/s)
+vCircle   = 0.65;   % fp_vCircle (m/s) -> v^2/R = 0.85 m/s^2
 
-% Braking distance needed to decelerate from v to 0 at maxAccVel = 2.0 m/s^2 including ~25 ms limiter lag:
-dBrake_straight = (vStraight^2) / (2 * maxAccVel) + 0.025 * vStraight;
-dBrake_circle   = (vCircle^2)   / (2 * maxAccVel) + 0.025 * vCircle;
+% Braking distance at maxAccVel = 2.0 m/s^2 plus 50 ms limiter lag (fp_dBrakeStr / fp_dBrakeCir):
+dBrake_straight = (vStraight^2) / (2 * maxAccVel) + 0.050 * vStraight;
+dBrake_circle   = (vCircle^2)   / (2 * maxAccVel) + 0.050 * vCircle;
 
 N = 12000; % 12.0 seconds simulation window
 t = (0:N-1)' * Ts;
@@ -134,10 +137,10 @@ for k = 1:N
     % -------------------------------------------------------------------
     w_ff = 0.0; % Curvature feedforward turnrate (rad/s)
     switch state
-        case 10 % Standstill & Gyro Calibration (0.1 s)
+        case 10 % Standstill & Gyro Calibration (0.25 s)
             vRef = 0.0;
             headRef = 0.0;
-            if tk >= 0.10
+            if tk > 0.25
                 state = 11;
                 stepStartDist = distA;
             end
@@ -150,7 +153,7 @@ for k = 1:N
             else
                 vRef = 0.0; % Smooth braking via acc_limit_vel right onto corner P1
             end
-            if s_seg >= (L1 - 0.005) || (s_seg > (L1 - dBrake_straight) && abs(v_meas) < 0.02)
+            if s_seg >= L1 || (s_seg >= (L1 - dBrake_straight) && abs(v_meas) < 0.04)
                 state = 12;
                 vRef = 0.0;
                 headRef = h_tan1; % -72.54 deg (-1.2661 rad)
@@ -159,21 +162,22 @@ for k = 1:N
         case 12 % Corner 1: Point turn at P1 to circle tangent (-1.2661 rad)
             vRef = 0.0;
             headRef = h_tan1;
-            if abs(headRef - headGyro) < 0.05 && abs(w_meas) < 0.35
+            if abs(headRef - headGyro) < 0.025 && abs(w_meas) < 0.25
                 state = 13;
                 stepStartDist = distA;
             end
 
         case 13 % Segment 2: Circle (R = 0.5 m, L_arc = 2.837 m)
             s_seg = distA - stepStartDist;
+            s_seg   = max(0, s_seg);
             headRef = min(h_tan2, h_tan1 + (s_seg / R_circ));
-            w_ff    = velLim / R_circ; % Exact curvature feedforward w = v / R
+            w_ff    = max(0, v_meas) / R_circ; % Curvature feedforward w = v_meas / R, as in firmware
             if s_seg < (L_arc - dBrake_circle)
                 vRef = vCircle;
             else
                 vRef = 0.0; % Smooth braking via acc_limit_vel right onto corner P2
             end
-            if s_seg >= (L_arc - 0.005) || (s_seg > (L_arc - dBrake_circle) && abs(v_meas) < 0.02)
+            if s_seg >= L_arc || (s_seg >= (L_arc - dBrake_circle) && abs(v_meas) < 0.04)
                 state = 14;
                 vRef = 0.0;
                 headRef = h_exit; % +180 deg (pi rad)
@@ -183,7 +187,7 @@ for k = 1:N
         case 14 % Corner 2: Point turn at P2 to exit straight (+pi rad)
             vRef = 0.0;
             headRef = h_exit;
-            if abs(headRef - headGyro) < 0.05 && abs(w_meas) < 0.35
+            if abs(headRef - headGyro) < 0.025 && abs(w_meas) < 0.25
                 state = 15;
                 stepStartDist = distA;
             end
@@ -196,10 +200,10 @@ for k = 1:N
             else
                 vRef = 0.0; % Smooth braking via acc_limit_vel to Stop
             end
-            if (s_seg >= (L2 - 0.005) || s_seg > (L2 - dBrake_straight)) && abs(v_meas) < 0.01
+            if s_seg >= L2 || (s_seg >= (L2 - dBrake_straight) && abs(v_meas) < 0.03)
                 state = 2;
                 vRef = 0.0;
-                tFinish = tk - 0.10; % Completion time from start of motion (tk = 0.10 s)
+                tFinish = tk - 0.25; % Completion time from start of motion (tk = 0.25 s)
             end
 
         case 2 % Finished
@@ -211,7 +215,13 @@ for k = 1:N
     % Outer Loop: Heading Controller + Curvature Feedforward
     % -------------------------------------------------------------------
     e_head  = headRef - headGyro;
-    turnRef = w_ff + Kp_head * e_head - Kd_head * (w_meas - w_ff);
+    isPointTurn = (state == 12 || state == 14);
+    kd = Kd_head;
+    if isPointTurn, kd = Kd_turn; end
+    turnRef = w_ff + Kp_head * e_head - kd * (w_meas - w_ff);
+    if isPointTurn && abs(e_head) > 0.04 && abs(turnRef) < minTurn
+        turnRef = sign(e_head) * minTurn;
+    end
     turnRef = max(-maxTurnrate, min(maxTurnrate, turnRef));
     headU   = turnRef * (B * 0.5);
 
