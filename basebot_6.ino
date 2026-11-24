@@ -36,8 +36,8 @@ float poseVel_prev[2] = {0.0f, 0.0f};
 float vx_prev = 0.0f;
 float vy_prev = 0.0f;
 
-// 22-deg tilted IMU gyroscope state
-const float imuTiltRad = 22.0f * float(M_PI) / 180.0f;
+// Tilted IMU gyroscope state (calibrated from overhead video: 24.7 deg effective tilt)
+const float imuTiltRad = 24.7f * float(M_PI) / 180.0f;
 float gyroZ_offset = 0.0f;
 bool gyroOffsetReady = false;
 float gyroTurnrate = 0.0f;
@@ -83,8 +83,8 @@ const float fp_hTan2     = 4.40770f;     // fp_hTan1 + fp_dTheta = +252.54 deg (
 const float fp_hExit     = float(M_PI);  // +180.0 deg (rad)
 const float fp_vStraight = 0.75f;        // (m/s)
 const float fp_vCircle   = 0.65f;        // (m/s)
-const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.050f * fp_vStraight;
-const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.050f * fp_vCircle;
+const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.042f * fp_vStraight;
+const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.042f * fp_vCircle;
 
 // Data logging structure
 typedef struct
