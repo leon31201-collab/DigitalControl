@@ -76,12 +76,13 @@ x_track = [x_ref1; x_ref2; x_ref3];
 y_track = [y_ref1; y_ref2; y_ref3];
 
 %% 3. Closed-Loop Simulation of SequenceFinalProject()
-vStraight = 0.75;   % fp_vStraight (m/s)
-vCircle   = 0.65;   % fp_vCircle (m/s) -> v^2/R = 0.85 m/s^2
+vStraight = 1.00;   % fp_vStraight (m/s)
+vCircle   = 0.75;   % fp_vCircle (m/s) -> v^2/R = 1.1 m/s^2
 
-% Braking distance at maxAccVel = 2.0 m/s^2 plus 50 ms limiter lag (fp_dBrakeStr / fp_dBrakeCir):
-dBrake_straight = (vStraight^2) / (2 * maxAccVel) + 0.050 * vStraight;
-dBrake_circle   = (vCircle^2)   / (2 * maxAccVel) + 0.050 * vCircle;
+% Braking: v_ref = min(v, sqrt(2*aBrake*remaining)) -> position feedback, stops on the point
+% regardless of speed and lag (fp_aBrake). Below maxAccVel so the limiter is not saturated.
+aBrake = 1.5;       % m/s^2 (fp_aBrake)
+brakeLead = 0.013;  % m (fp_brakeLead): real-robot overshoot from speed-loop lag, measured on Kaya
 
 N = 12000; % 12.0 seconds simulation window
 t = (0:N-1)' * Ts;
@@ -148,12 +149,9 @@ for k = 1:N
         case 11 % Segment 1: Straight 1.0 m (h_ref = 0 rad)
             s_seg = distA - stepStartDist;
             headRef = 0.0;
-            if s_seg < (L1 - dBrake_straight)
-                vRef = vStraight;
-            else
-                vRef = 0.0; % Smooth braking via acc_limit_vel right onto corner P1
-            end
-            if s_seg >= L1 || (s_seg >= (L1 - dBrake_straight) && abs(v_meas) < 0.04)
+            rem  = L1 - s_seg - brakeLead;
+            vRef = min(vStraight, sqrt(2 * aBrake * max(0, rem)));
+            if rem <= 0 || (rem < 0.01 && abs(v_meas) < 0.04)
                 state = 12;
                 vRef = 0.0;
                 headRef = h_tan1; % -72.54 deg (-1.2661 rad)
@@ -172,12 +170,9 @@ for k = 1:N
             s_seg   = max(0, s_seg);
             headRef = min(h_tan2, h_tan1 + (s_seg / R_circ));
             w_ff    = max(0, v_meas) / R_circ; % Curvature feedforward w = v_meas / R, as in firmware
-            if s_seg < (L_arc - dBrake_circle)
-                vRef = vCircle;
-            else
-                vRef = 0.0; % Smooth braking via acc_limit_vel right onto corner P2
-            end
-            if s_seg >= L_arc || (s_seg >= (L_arc - dBrake_circle) && abs(v_meas) < 0.04)
+            rem  = L_arc - s_seg - brakeLead;
+            vRef = min(vCircle, sqrt(2 * aBrake * max(0, rem)));
+            if rem <= 0 || (rem < 0.01 && abs(v_meas) < 0.04)
                 state = 14;
                 vRef = 0.0;
                 headRef = h_exit; % +180 deg (pi rad)
@@ -195,12 +190,9 @@ for k = 1:N
         case 15 % Segment 3: Straight 1.5 m to Stop (h_ref = pi rad)
             s_seg = distA - stepStartDist;
             headRef = h_exit;
-            if s_seg < (L2 - dBrake_straight)
-                vRef = vStraight;
-            else
-                vRef = 0.0; % Smooth braking via acc_limit_vel to Stop
-            end
-            if s_seg >= L2 || (s_seg >= (L2 - dBrake_straight) && abs(v_meas) < 0.03)
+            rem  = L2 - s_seg - brakeLead;
+            vRef = min(vStraight, sqrt(2 * aBrake * max(0, rem)));
+            if rem <= 0 || (rem < 0.01 && abs(v_meas) < 0.03)
                 state = 2;
                 vRef = 0.0;
                 tFinish = tk - 0.25; % Completion time from start of motion (tk = 0.25 s)
@@ -253,7 +245,7 @@ for k = 1:N
 
     uL = max(-Vmax, min(Vmax, Kp_vel * errL + velInt(1)));
     uR = max(-Vmax, min(Vmax, Kp_vel * errR + velInt(2)));
-    if state == 10 || state == 2
+    if state == 10   % firmware keeps controlUpdate() running in state 2 (active braking)
         uL = 0; uR = 0;
     end
 

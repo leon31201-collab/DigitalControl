@@ -81,10 +81,19 @@ const float fp_dTheta    = 5.67380f;     // 2*pi - 2*asin(0.15/0.50)  = 325.08 d
 const float fp_Larc      = 2.83690f;     // R * fp_dTheta (m)
 const float fp_hTan2     = 4.40770f;     // fp_hTan1 + fp_dTheta = +252.54 deg (rad)
 const float fp_hExit     = float(M_PI);  // +180.0 deg (rad)
-const float fp_vStraight = 0.75f;        // (m/s)
-const float fp_vCircle   = 0.65f;        // (m/s)
-const float fp_dBrakeStr = (fp_vStraight * fp_vStraight) / (2.0f * maxAccVel) + 0.042f * fp_vStraight;
-const float fp_dBrakeCir = (fp_vCircle * fp_vCircle)     / (2.0f * maxAccVel) + 0.042f * fp_vCircle;
+const float fp_vStraight = 1.00f;        // (m/s) (was 0.75)
+const float fp_vCircle   = 0.75f;        // (m/s), v^2/R = 1.1 m/s^2 (was 0.65)
+// Braking: v_ref = min(v, sqrt(2 * fp_aBrake * remaining)). Position feedback, so the robot stops
+// on the corner / end point whatever the speed, lag or battery. Below maxAccVel so the
+// acceleration limiter is not saturated while braking.
+const float fp_aBrake    = 1.5f;         // (m/s^2)
+// Calibration: the speed loop lags ~70 ms, so the robot reaches the point at ~0.22 m/s and
+// overshoots ~1.3 cm (Kaya logs 24 Nov, same at 0.75 and 1.0 m/s). Aim that much earlier.
+const float fp_brakeLead = 0.013f;       // (m)
+float brakeRef(float v, float remaining)
+{
+  return fminf(v, sqrtf(2.0f * fp_aBrake * fmaxf(remaining, 0.0f)));
+}
 
 // Data logging structure
 typedef struct
@@ -369,9 +378,10 @@ void SequenceTwoSteps()
         float s_seg = distA - stepStartDist;
         desiredHeading = 0.0f;
         turnRateFF = 0.0f;
-        desiredValue = (s_seg < (fp_L1 - fp_dBrakeStr)) ? fp_vStraight : 0.0f;
+        float rem = fp_L1 - s_seg - fp_brakeLead;
+        desiredValue = brakeRef(fp_vStraight, rem);
 
-        if ((s_seg >= (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.04f) || s_seg >= fp_L1)
+        if (rem <= 0.0f || (rem < 0.01f && fabsf(poseVel[0]) < 0.04f))
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hTan1;
@@ -406,9 +416,10 @@ void SequenceTwoSteps()
         float vFwd = (poseVel[0] > 0.0f) ? poseVel[0] : 0.0f;
         turnRateFF = vFwd / fp_R;
 
-        desiredValue = (s_seg < (fp_Larc - fp_dBrakeCir)) ? fp_vCircle : 0.0f;
+        float rem = fp_Larc - s_seg - fp_brakeLead;
+        desiredValue = brakeRef(fp_vCircle, rem);
 
-        if ((s_seg >= (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.04f) || s_seg >= fp_Larc)
+        if (rem <= 0.0f || (rem < 0.01f && fabsf(poseVel[0]) < 0.04f))
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hExit;
@@ -437,9 +448,10 @@ void SequenceTwoSteps()
         float s_seg = distA - stepStartDist;
         desiredHeading = fp_hExit;
         turnRateFF = 0.0f;
-        desiredValue = (s_seg < (fp_L2 - fp_dBrakeStr)) ? fp_vStraight : 0.0f;
+        float rem = fp_L2 - s_seg - fp_brakeLead;
+        desiredValue = brakeRef(fp_vStraight, rem);
 
-        if ((s_seg >= (fp_L2 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.03f) || s_seg >= fp_L2)
+        if (rem <= 0.0f || (rem < 0.01f && fabsf(poseVel[0]) < 0.03f))
         {
           stop(0.5f);
         }
