@@ -214,9 +214,9 @@ void reset()
   vx_prev = 0.0f;
   vy_prev = 0.0f;
 
-  if (!gyroOffsetReady)
+  if (!gyroOffsetReady || fabsf(gyroZ_offset) > 1.0f)
   {
-    gyroZ_offset = imu2.gyro[2];
+    gyroZ_offset = constrain(imu2.gyro[2], -0.8f, 0.8f);
     gyroOffsetReady = true;
   }
   gyroTurnrate = 0.0f;
@@ -290,15 +290,18 @@ void updatePose()
 
   if (state == 0)
   {
-    if (!gyroOffsetReady)
+    if (fabsf(encoder.motorVelocity[0]) < 0.05f && fabsf(encoder.motorVelocity[1]) < 0.05f &&
+        fabsf(imu2.gyro[2]) < 1.5f && fabsf(imu2.gyro[1]) < 1.5f)
     {
-      gyroZ_offset = imu2.gyro[2];
-      gyroOffsetReady = true;
-    }
-    else if (fabsf(encoder.motorVelocity[0]) < 0.05f && fabsf(encoder.motorVelocity[1]) < 0.05f &&
-             fabsf(imu2.gyro[2] - gyroZ_offset) < 1.2f)
-    {
-      gyroZ_offset = 0.995f * gyroZ_offset + 0.005f * imu2.gyro[2];
+      if (!gyroOffsetReady)
+      {
+        gyroZ_offset = imu2.gyro[2];
+        gyroOffsetReady = true;
+      }
+      else
+      {
+        gyroZ_offset = 0.99f * gyroZ_offset + 0.01f * imu2.gyro[2];
+      }
     }
     gyroTurnrate = 0.0f;
     gyroTurnrate_prev = 0.0f;
@@ -306,10 +309,11 @@ void updatePose()
   }
   else if (state == 10)
   {
-    if (fabsf(imu2.gyro[2] - gyroZ_offset) < 0.8f)
+    if (fabsf(imu2.gyro[2]) < 1.5f && fabsf(imu2.gyro[1]) < 1.5f)
     {
-      gyroZ_offset = 0.98f * gyroZ_offset + 0.02f * imu2.gyro[2];
+      gyroZ_offset = 0.96f * gyroZ_offset + 0.04f * imu2.gyro[2];
     }
+    gyroZ_offset = constrain(gyroZ_offset, -1.0f, 1.0f);
     gyroTurnrate = 0.0f;
     gyroTurnrate_prev = 0.0f;
     gyroHeading = 0.0f;
@@ -344,12 +348,12 @@ void SequenceTwoSteps()
         start();
         desiredValue = 0.0f;
         desiredHeading = 0.0f;
-        endTime = time_sec + 0.100f;
+        endTime = time_sec + 0.250f;
         state = 10;
       }
       break;
 
-    case 10: // Brief standstill before launch
+    case 10: // Standstill before launch for clean gyro offset
       if (time_sec > endTime)
       {
         desiredValue = fp_vStraight;
@@ -360,14 +364,14 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 11: // Segment 1: Entry Straight (1.0 m along y = 0)
+    case 11: // Segment 1: Entry Straight (1.0 m)
       {
         float s_seg = distA - stepStartDist;
-        desiredHeading = constrain(-2.0f * pose[1], -0.10f, 0.10f);
+        desiredHeading = 0.0f;
         turnRateFF = 0.0f;
         desiredValue = (s_seg < (fp_L1 - fp_dBrakeStr)) ? fp_vStraight : 0.0f;
 
-        if ((s_seg >= (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.04f) || s_seg >= (fp_L1 + 0.015f))
+        if ((s_seg >= (fp_L1 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.04f) || s_seg >= fp_L1)
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hTan1;
@@ -391,24 +395,20 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 13: // Segment 2: Circular Loop (R = 0.50 m, L_arc = 2.837 m, center = (1.477, 0.150))
+    case 13: // Segment 2: Circular Loop (R = 0.50 m, L_arc = 2.837 m)
       {
         float s_seg = distA - stepStartDist;
         if (s_seg < 0.0f) s_seg = 0.0f;
 
-        float h_nom = fp_hTan1 + (s_seg / fp_R);
-        if (h_nom > fp_hTan2) h_nom = fp_hTan2;
-        float dx = pose[0] - fp_xc;
-        float dy = pose[1] - fp_yc;
-        float r_err = sqrtf(dx * dx + dy * dy) - fp_R;
-        desiredHeading = h_nom + constrain(2.0f * r_err, -0.15f, 0.15f);
+        desiredHeading = fp_hTan1 + (s_seg / fp_R);
+        if (desiredHeading > fp_hTan2) desiredHeading = fp_hTan2;
 
         float vFwd = (poseVel[0] > 0.0f) ? poseVel[0] : 0.0f;
         turnRateFF = vFwd / fp_R;
 
         desiredValue = (s_seg < (fp_Larc - fp_dBrakeCir)) ? fp_vCircle : 0.0f;
 
-        if ((s_seg >= (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.04f) || s_seg >= (fp_Larc + 0.015f))
+        if ((s_seg >= (fp_Larc - fp_dBrakeCir) && fabsf(poseVel[0]) < 0.04f) || s_seg >= fp_Larc)
         {
           desiredValue = 0.0f;
           desiredHeading = fp_hExit;
@@ -432,14 +432,14 @@ void SequenceTwoSteps()
       }
       break;
 
-    case 15: // Segment 3: Exit Straight (1.5 m along y = 0.30 m) to Stop at x = -0.500 m
+    case 15: // Segment 3: Exit Straight (1.5 m) to Stop
       {
-        float distToStop = pose[0] - (-0.500f);
-        desiredHeading = fp_hExit + constrain(2.0f * (pose[1] - 0.300f), -0.12f, 0.12f);
+        float s_seg = distA - stepStartDist;
+        desiredHeading = fp_hExit;
         turnRateFF = 0.0f;
-        desiredValue = (distToStop > fp_dBrakeStr) ? fp_vStraight : 0.0f;
+        desiredValue = (s_seg < (fp_L2 - fp_dBrakeStr)) ? fp_vStraight : 0.0f;
 
-        if (distToStop <= 0.005f || (distToStop <= fp_dBrakeStr && fabsf(poseVel[0]) < 0.02f))
+        if ((s_seg >= (fp_L2 - fp_dBrakeStr) && fabsf(poseVel[0]) < 0.03f) || s_seg >= fp_L2)
         {
           stop(0.5f);
         }
